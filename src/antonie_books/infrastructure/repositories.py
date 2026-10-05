@@ -69,7 +69,7 @@ class MongoBookRepository:
     async def update(
         self, book_id: int, changes: UpdateBookCommand, updated_at: Any
     ) -> Book | None:
-        values: dict[str, Any] = {"updated_at": updated_at}
+        values: dict[str, Any] = {}
         for field in ("title", "publisher", "pages", "tags", "author_ids"):
             value = getattr(changes, field)
             if value is None:
@@ -80,10 +80,25 @@ class MongoBookRepository:
                 value = Int64(value)
             elif field == "tags":
                 value = list(value)
-            values[field] = value
+            # Pipeline updates treat strings beginning with "$" as field references. Literal
+            # wrappers preserve client-supplied values as data while still allowing the
+            # timestamp expression below to advance monotonically.
+            values[field] = {"$literal": value}
+        values["updated_at"] = {
+            "$max": [
+                updated_at,
+                {
+                    "$dateAdd": {
+                        "startDate": "$updated_at",
+                        "unit": "millisecond",
+                        "amount": 1,
+                    }
+                },
+            ]
+        }
         document = await self._books.find_one_and_update(
             {"id": Int64(book_id)},
-            {"$set": values},
+            [{"$set": values}],
             return_document=ReturnDocument.AFTER,
         )
         return book_from_document(document) if document is not None else None

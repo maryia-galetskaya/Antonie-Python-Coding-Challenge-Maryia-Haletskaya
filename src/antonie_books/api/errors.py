@@ -4,8 +4,10 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from pymongo.errors import ConnectionFailure
 
 from antonie_books.application.errors import DatabaseUnavailableError
+from antonie_books.application.service_errors import BookNotFoundError
 from antonie_books.domain.errors import DomainError
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,16 @@ async def domain_error_handler(request: Request, exc: DomainError) -> JSONRespon
     )
 
 
+async def book_not_found_handler(request: Request, exc: BookNotFoundError) -> JSONResponse:
+    """Render missing books as a stable not-found response."""
+
+    del request
+    return JSONResponse(
+        status_code=404,
+        content={"error": {"code": exc.code, "message": str(exc)}},
+    )
+
+
 async def database_unavailable_handler(
     request: Request, exc: DatabaseUnavailableError
 ) -> JSONResponse:
@@ -28,6 +40,23 @@ async def database_unavailable_handler(
 
     del request
     logger.warning("Database unavailable while handling request: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": {
+                "code": "database_unavailable",
+                "message": "The database is temporarily unavailable.",
+            }
+        },
+        headers={"Retry-After": "1"},
+    )
+
+
+async def mongo_connection_error_handler(request: Request, exc: ConnectionFailure) -> JSONResponse:
+    """Map PyMongo network and server-selection failures to the safe 503 contract."""
+
+    del request
+    logger.warning("MongoDB connection failed while handling request: %s", exc)
     return JSONResponse(
         status_code=503,
         content={
@@ -59,13 +88,16 @@ def register_exception_handlers(app: FastAPI) -> None:
     """Register application exception handlers, leaving FastAPI validation intact."""
 
     app.add_exception_handler(DomainError, domain_error_handler)
+    app.add_exception_handler(BookNotFoundError, book_not_found_handler)
     app.add_exception_handler(DatabaseUnavailableError, database_unavailable_handler)
+    app.add_exception_handler(ConnectionFailure, mongo_connection_error_handler)
     app.add_exception_handler(Exception, unexpected_error_handler)
 
 
 __all__ = [
     "database_unavailable_handler",
     "domain_error_handler",
+    "mongo_connection_error_handler",
     "register_exception_handlers",
     "unexpected_error_handler",
 ]

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from pymongo.errors import ServerSelectionTimeoutError
 
 from antonie_books.api.app import create_app
 from antonie_books.api.config import Settings
@@ -59,6 +60,26 @@ def test_database_unavailable_returns_safe_503() -> None:
         }
     }
     assert "connection details" not in response.text
+
+
+def test_mongo_connection_failures_return_safe_503() -> None:
+    app = create_app()
+    app.add_api_route(
+        "/mongo-error",
+        lambda: (_ for _ in ()).throw(ServerSelectionTimeoutError("private topology detail")),
+    )
+
+    response = TestClient(app).get("/mongo-error")
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
+    assert response.json() == {
+        "error": {
+            "code": "database_unavailable",
+            "message": "The database is temporarily unavailable.",
+        }
+    }
+    assert "private topology detail" not in response.text
 
 
 def test_unexpected_errors_return_safe_500() -> None:
