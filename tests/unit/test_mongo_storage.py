@@ -7,6 +7,7 @@ import pytest
 from bson import Int64
 from pymongo import ReturnDocument
 
+from antonie_books.application.commands import UpdateBookCommand
 from antonie_books.domain.models import Author, Book
 from antonie_books.infrastructure.mappers import (
     author_from_document,
@@ -15,7 +16,7 @@ from antonie_books.infrastructure.mappers import (
     book_to_document,
 )
 from antonie_books.infrastructure.mongo import MongoDatabase, MongoInitializationError
-from antonie_books.infrastructure.repositories import MongoBookIdGenerator
+from antonie_books.infrastructure.repositories import MongoBookIdGenerator, MongoBookRepository
 
 
 def test_author_mapping_stores_int64_and_round_trips_date() -> None:
@@ -53,6 +54,40 @@ async def test_id_generator_uses_one_atomic_update_without_upsert() -> None:
         {"$inc": {"seq": Int64(1)}},
         return_document=ReturnDocument.AFTER,
     )
+
+
+@pytest.mark.asyncio
+async def test_book_update_uses_atomic_monotonic_millisecond_timestamp() -> None:
+    collection = AsyncMock()
+    authors = AsyncMock()
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+    collection.find_one_and_update.return_value = {
+        "id": Int64(7),
+        "title": "$publisher",
+        "publisher": "Press",
+        "author_ids": [Int64(2)],
+        "pages": Int64(123),
+        "tags": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    repository = MongoBookRepository(collection, authors)
+
+    updated = await repository.update(7, UpdateBookCommand(title="$publisher"), now)
+
+    assert updated is not None
+    assert updated.title == "$publisher"
+    filter_doc, pipeline = collection.find_one_and_update.await_args.args
+    assert filter_doc == {"id": Int64(7)}
+    assert pipeline[0]["$set"]["title"] == {"$literal": "$publisher"}
+    assert pipeline[0]["$set"]["updated_at"]["$max"][0] == now
+    assert pipeline[0]["$set"]["updated_at"]["$max"][1] == {
+        "$dateAdd": {
+            "startDate": "$updated_at",
+            "unit": "millisecond",
+            "amount": 1,
+        }
+    }
 
 
 @pytest.mark.asyncio

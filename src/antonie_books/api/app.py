@@ -2,12 +2,20 @@
 
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import UTC, datetime
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 
+from antonie_books.api.books import router as books_router
 from antonie_books.api.config import Settings
 from antonie_books.api.errors import register_exception_handlers
+from antonie_books.application.services import AuthorService, BookService, PublisherService
 from antonie_books.infrastructure.mongo import connect_mongo
+from antonie_books.infrastructure.repositories import (
+    MongoAuthorRepository,
+    MongoBookIdGenerator,
+    MongoBookRepository,
+)
 
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
@@ -20,6 +28,22 @@ async def _mongo_lifespan(app: FastAPI):
     client, database = await connect_mongo(settings.mongo_uri, settings.mongo_database)
     app.state.mongo_client = client
     app.state.mongo_database = database.database
+    if app.state.use_mongo_services:
+        mongo_db = database.database
+        books = MongoBookRepository(mongo_db["books"], mongo_db["authors"])
+        authors = MongoAuthorRepository(mongo_db["authors"], mongo_db["books"])
+
+        class SystemClock:
+            def now(self) -> datetime:
+                return datetime.now(UTC)
+
+        app.state.container = {
+            "book_service": BookService(
+                books, authors, MongoBookIdGenerator(mongo_db["counters"]), SystemClock()
+            ),
+            "author_service": AuthorService(authors, books),
+            "publisher_service": PublisherService(books),
+        }
     try:
         yield
     finally:
@@ -45,15 +69,9 @@ def create_app(
     app = FastAPI(title=runtime_settings.app_name, lifespan=app_lifespan)
     app.state.settings = runtime_settings
     app.state.container = container if container is not None else {}
+    app.state.use_mongo_services = container is None
     register_exception_handlers(app)
-
-    @app.get("/books", tags=["books"])
-    async def list_books(
-        page: int = Query(default=1, ge=1), limit: int = Query(default=20, ge=1, le=100)
-    ) -> dict[str, object]:
-        """Temporary empty collection response used until the book routes are added."""
-
-        return {"items": [], "page": page, "limit": limit, "total": 0}
+    app.include_router(books_router)
 
     return app
 
