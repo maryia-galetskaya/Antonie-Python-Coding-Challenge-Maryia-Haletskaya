@@ -11,7 +11,11 @@ from antonie_books.application.results import (
     PageResult,
     PublisherAverageResult,
 )
-from antonie_books.application.service_errors import AuthorNotFoundError, BookNotFoundError
+from antonie_books.application.service_errors import (
+    AuthorNotFoundError,
+    BookNotFoundError,
+    UnknownBookAuthorError,
+)
 from antonie_books.domain.models import Author, Book
 
 
@@ -47,7 +51,7 @@ class BookService:
         never rolled back if construction or repository insertion fails.
         """
 
-        authors = await self._require_authors(command.author_ids)
+        authors = await self._require_authors(command.author_ids, for_write=True)
         now = _utc_millisecond_time(self._clock)
         book_id = await self._id_generator.next_id()
         book = Book(
@@ -96,7 +100,7 @@ class BookService:
         """Apply only supplied fields and retain the repository's current book state."""
 
         if changes.author_ids is not None:
-            await self._require_authors(changes.author_ids)
+            await self._require_authors(changes.author_ids, for_write=True)
         updated_at = _utc_millisecond_time(self._clock)
         book = await self._books.update(book_id, changes, updated_at)
         if book is None:
@@ -109,11 +113,15 @@ class BookService:
         if not await self._books.delete(book_id):
             raise BookNotFoundError(book_id)
 
-    async def _require_authors(self, author_ids: tuple[int, ...]) -> tuple[Author, ...]:
+    async def _require_authors(
+        self, author_ids: tuple[int, ...], *, for_write: bool = False
+    ) -> tuple[Author, ...]:
         authors = await self._authors.get_many(author_ids)
         found_ids = {author.id for author in authors}
         missing = tuple(author_id for author_id in author_ids if author_id not in found_ids)
         if missing:
+            if for_write:
+                raise UnknownBookAuthorError(missing)
             raise AuthorNotFoundError(missing)
         return authors
 

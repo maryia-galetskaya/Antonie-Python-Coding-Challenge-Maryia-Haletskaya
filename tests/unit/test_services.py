@@ -6,7 +6,11 @@ import pytest
 from antonie_books.application.commands import CreateBookCommand, UpdateBookCommand
 from antonie_books.application.filters import BookFilter, PageRequest
 from antonie_books.application.results import PageResult
-from antonie_books.application.service_errors import AuthorNotFoundError, BookNotFoundError
+from antonie_books.application.service_errors import (
+    AuthorNotFoundError,
+    BookNotFoundError,
+    UnknownBookAuthorError,
+)
 from antonie_books.application.services import AuthorService, BookService, PublisherService
 from antonie_books.domain.models import Author, Book
 
@@ -158,7 +162,7 @@ async def test_create_assigns_id_and_utc_millisecond_timestamps() -> None:
 async def test_create_validates_all_authors_before_consuming_id() -> None:
     service, books, _, ids = make_service(author_ids=(1,))
 
-    with pytest.raises(AuthorNotFoundError) as error:
+    with pytest.raises(UnknownBookAuthorError) as error:
         await service.create(command(author_ids=(1, 999)))
 
     assert error.value.author_ids == (999,)
@@ -222,7 +226,7 @@ async def test_update_rejects_unknown_authors_without_changing_book() -> None:
     service, books, _, _ = make_service(author_ids=(1,))
     created = await service.create(command(author_ids=(1,)))
 
-    with pytest.raises(AuthorNotFoundError):
+    with pytest.raises(UnknownBookAuthorError):
         await service.update(created.book.id, UpdateBookCommand(author_ids=(999,)))
 
     assert books.books[created.book.id] == created.book
