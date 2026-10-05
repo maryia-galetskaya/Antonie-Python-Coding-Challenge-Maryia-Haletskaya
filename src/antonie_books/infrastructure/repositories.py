@@ -126,7 +126,8 @@ class MongoBookRepository:
             {"$unwind": "$author_ids"},
             {"$group": {"_id": "$author_ids", "count": {"$sum": 1}}},
         ]
-        rows = await self._books.aggregate(pipeline).to_list(length=None)
+        cursor = await self._books.aggregate(pipeline)
+        rows = await cursor.to_list(length=None)
         return {int(row["_id"]): int(row["count"]) for row in rows}
 
     async def publisher_average_pages(self, publisher: str) -> tuple[float, int] | None:
@@ -140,7 +141,8 @@ class MongoBookRepository:
                 }
             },
         ]
-        rows = await self._books.aggregate(pipeline).to_list(length=1)
+        cursor = await self._books.aggregate(pipeline)
+        rows = await cursor.to_list(length=1)
         if not rows:
             return None
         return float(rows[0]["average_pages"]), int(rows[0]["book_count"])
@@ -207,7 +209,8 @@ class MongoAuthorRepository:
             },
             {"$sort": {"id": ASCENDING}},
         ]
-        documents = await self._authors.aggregate(pipeline).to_list(length=None)
+        cursor = await self._authors.aggregate(pipeline)
+        documents = await cursor.to_list(length=None)
         return tuple(
             AuthorResult(author_from_document(document), int(document["book_count"]))
             for document in documents

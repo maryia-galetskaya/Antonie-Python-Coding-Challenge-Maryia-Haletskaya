@@ -96,8 +96,11 @@ class FakeBookRepository:
 
     async def list_for_author(self, author_id: int, page: PageRequest) -> PageResult[Book]:
         self.last_page = page
-        items = tuple(book for book in self.books.values() if author_id in book.author_ids)
-        return PageResult(items, page.page, page.limit, len(items))
+        matching = tuple(book for book in self.books.values() if author_id in book.author_ids)
+        start = (page.page - 1) * page.limit
+        return PageResult(
+            matching[start : start + page.limit], page.page, page.limit, len(matching)
+        )
 
     async def author_book_counts(self) -> dict[int, int]:
         return {}
@@ -268,3 +271,30 @@ async def test_author_and_publisher_services_delegate_to_repositories() -> None:
     )
     assert books.last_page == PageRequest(page=2, limit=4)
     assert await publisher_service.get_average("No publisher") is None
+
+
+async def test_author_book_results_batch_author_resolution_and_keep_page_metadata() -> None:
+    service, books, authors, _ = make_service()
+    await service.create(command(author_ids=(1, 2)))
+    await service.create(command(title="Second", author_ids=(2, 1)))
+    authors.get_many_calls.clear()
+
+    result = await AuthorService(authors, books).list_books(1, PageRequest(page=2, limit=1))
+
+    assert result.page == 2
+    assert result.limit == 1
+    assert result.total == 2
+    assert len(result.items) == 1
+    assert result.items[0].authors == (authors.authors[2], authors.authors[1])
+    assert authors.get_many_calls == [(2, 1)]
+
+
+async def test_author_book_results_raise_for_missing_author_details() -> None:
+    service, books, authors, _ = make_service(author_ids=(1, 2))
+    await service.create(command(author_ids=(1, 2)))
+    del authors.authors[2]
+
+    with pytest.raises(AuthorNotFoundError) as error:
+        await AuthorService(authors, books).list_books(1)
+
+    assert error.value.author_ids == (2,)

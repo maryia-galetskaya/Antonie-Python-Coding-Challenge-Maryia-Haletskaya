@@ -137,11 +137,24 @@ class AuthorService:
     async def list_with_book_counts(self) -> tuple[AuthorResult, ...]:
         return await self._authors.list_with_book_counts()
 
-    async def list_books(self, author_id: int, page: PageRequest | None = None) -> PageResult[Book]:
-        """List books by an author, including an empty page when none are found."""
+    async def list_books(
+        self, author_id: int, page: PageRequest | None = None
+    ) -> PageResult[BookResult]:
+        """List an author's books with batched author details, even when the page is empty."""
 
         await self.get(author_id)
-        return await self._books.list_for_author(author_id, page or PageRequest())
+        books = await self._books.list_for_author(author_id, page or PageRequest())
+        author_ids = tuple(dict.fromkeys(i for book in books.items for i in book.author_ids))
+        authors = await self._authors.get_many(author_ids) if author_ids else ()
+        authors_by_id = {author.id: author for author in authors}
+        missing = tuple(i for i in author_ids if i not in authors_by_id)
+        if missing:
+            raise AuthorNotFoundError(missing)
+        items = tuple(
+            BookResult(book, tuple(authors_by_id[i] for i in book.author_ids))
+            for book in books.items
+        )
+        return PageResult(items, books.page, books.limit, books.total)
 
 
 class PublisherService:

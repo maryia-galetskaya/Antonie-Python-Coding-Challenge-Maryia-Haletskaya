@@ -101,6 +101,16 @@ class AuthorResponse(BaseModel):
     birth_date: date | None
 
 
+class AuthorWithBookCountResponse(AuthorResponse):
+    book_count: int
+
+
+class PublisherAverageResponse(BaseModel):
+    publisher: str
+    average_pages: float
+    book_count: int
+
+
 class BookResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -126,8 +136,10 @@ class BookPageResponse(BaseModel):
 
 __all__ = [
     "AuthorResponse",
+    "AuthorWithBookCountResponse",
     "BookCreateRequest",
     "BookPageResponse",
     "BookPatchRequest",
     "BookResponse",
+    "PublisherAverageResponse",
 ]

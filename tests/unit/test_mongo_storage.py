@@ -9,6 +9,7 @@ from pymongo import ReturnDocument
 
 from antonie_books.application.commands import UpdateBookCommand
 from antonie_books.application.filters import BookFilter
+from antonie_books.application.results import AuthorResult
 from antonie_books.domain.models import Author, Book
 from antonie_books.infrastructure.mappers import (
     author_from_document,
@@ -17,7 +18,11 @@ from antonie_books.infrastructure.mappers import (
     book_to_document,
 )
 from antonie_books.infrastructure.mongo import MongoDatabase, MongoInitializationError
-from antonie_books.infrastructure.repositories import MongoBookIdGenerator, MongoBookRepository
+from antonie_books.infrastructure.repositories import (
+    MongoAuthorRepository,
+    MongoBookIdGenerator,
+    MongoBookRepository,
+)
 
 
 def test_author_mapping_stores_int64_and_round_trips_date() -> None:
@@ -89,6 +94,43 @@ async def test_book_update_uses_atomic_monotonic_millisecond_timestamp() -> None
             "amount": 1,
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_report_aggregations_await_async_aggregate_cursors() -> None:
+    books = AsyncMock()
+    book_cursor = AsyncMock()
+    book_cursor.to_list.return_value = [{"_id": Int64(7), "count": 2}]
+    average_cursor = AsyncMock()
+    average_cursor.to_list.return_value = [{"average_pages": 150.5, "book_count": 2}]
+    books.aggregate.side_effect = [book_cursor, average_cursor]
+    author_collection = AsyncMock()
+    author_cursor = AsyncMock()
+    author_cursor.to_list.return_value = [
+        {
+            "id": Int64(7),
+            "name": "Ada Lovelace",
+            "birth_date": None,
+            "book_count": 2,
+        }
+    ]
+    author_collection.aggregate.return_value = author_cursor
+    book_repository = MongoBookRepository(books, AsyncMock())
+    author_repository = MongoAuthorRepository(author_collection, books)
+
+    assert await book_repository.author_book_counts() == {7: 2}
+    assert await book_repository.publisher_average_pages("Press") == (150.5, 2)
+    assert await author_repository.list_with_book_counts() == (
+        AuthorResult(
+            author_from_document({"id": Int64(7), "name": "Ada Lovelace", "birth_date": None}),
+            book_count=2,
+        ),
+    )
+    assert books.aggregate.await_count == 2
+    book_cursor.to_list.assert_awaited_once_with(length=None)
+    average_cursor.to_list.assert_awaited_once_with(length=1)
+    assert author_collection.aggregate.await_count == 1
+    author_cursor.to_list.assert_awaited_once_with(length=None)
 
 
 @pytest.mark.asyncio

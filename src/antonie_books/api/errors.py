@@ -7,7 +7,11 @@ from fastapi.responses import JSONResponse
 from pymongo.errors import ConnectionFailure
 
 from antonie_books.application.errors import DatabaseUnavailableError
-from antonie_books.application.service_errors import BookNotFoundError
+from antonie_books.application.service_errors import (
+    AuthorNotFoundError,
+    BookNotFoundError,
+    PublisherNotFoundError,
+)
 from antonie_books.domain.errors import DomainError
 
 logger = logging.getLogger(__name__)
@@ -25,6 +29,28 @@ async def domain_error_handler(request: Request, exc: DomainError) -> JSONRespon
 
 async def book_not_found_handler(request: Request, exc: BookNotFoundError) -> JSONResponse:
     """Render missing books as a stable not-found response."""
+
+    del request
+    return JSONResponse(
+        status_code=404,
+        content={"error": {"code": exc.code, "message": str(exc)}},
+    )
+
+
+async def author_not_found_handler(request: Request, exc: AuthorNotFoundError) -> JSONResponse:
+    """Render unknown author resources as a stable not-found response."""
+
+    del request
+    return JSONResponse(
+        status_code=404,
+        content={"error": {"code": exc.code, "message": str(exc)}},
+    )
+
+
+async def publisher_not_found_handler(
+    request: Request, exc: PublisherNotFoundError
+) -> JSONResponse:
+    """Render unknown publisher reports as a stable not-found response."""
 
     del request
     return JSONResponse(
@@ -89,6 +115,8 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(DomainError, domain_error_handler)
     app.add_exception_handler(BookNotFoundError, book_not_found_handler)
+    app.add_exception_handler(AuthorNotFoundError, author_not_found_handler)
+    app.add_exception_handler(PublisherNotFoundError, publisher_not_found_handler)
     app.add_exception_handler(DatabaseUnavailableError, database_unavailable_handler)
     app.add_exception_handler(ConnectionFailure, mongo_connection_error_handler)
     app.add_exception_handler(Exception, unexpected_error_handler)
