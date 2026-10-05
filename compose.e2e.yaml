@@ -2,6 +2,7 @@ name: antonie-books-e2e
 
 services:
   api:
+    image: ${ANTONIE_BOOKS_API_IMAGE:-antonie-books-e2e:local}
     build:
       context: .
     environment:
