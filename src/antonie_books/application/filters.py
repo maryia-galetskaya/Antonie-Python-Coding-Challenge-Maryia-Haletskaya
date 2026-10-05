@@ -13,9 +13,11 @@ class PageRequest:
     def __post_init__(self) -> None:
         for name, value in (("page", self.page), ("limit", self.limit)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise InvalidDomainValue(f"{name} must be a positive integer")
-        if self.limit > 100:
-            raise InvalidDomainValue("limit must not exceed 100")
+                if name == "page":
+                    raise InvalidDomainValue("page must be a positive integer")
+                raise InvalidDomainValue("limit must be a positive integer")
+            if name == "limit" and value > 100:
+                raise InvalidDomainValue(f"{name} must not exceed 100")
 
 
 @dataclass(frozen=True, slots=True)

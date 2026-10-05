@@ -151,3 +151,117 @@ def test_book_http_errors_and_strict_validation(api_client, e2e_database_name: s
     for invalid_patch in invalid_patches:
         response = api_client.patch("/books/1", json=invalid_patch)
         assert response.status_code == 422, (invalid_patch, response.text)
+
+
+def test_book_http_filters_and_pagination(api_client, e2e_database_name: str) -> None:
+    _insert_authors(e2e_database_name)
+    with MongoClient(
+        "mongodb://localhost:27018/?retryWrites=false", serverSelectionTimeoutMS=5_000
+    ) as client:
+        client[e2e_database_name]["books"].delete_many({})
+    fixtures = [
+        ("Python [Regex] Guide", [901], ["Python", "Development"]),
+        ("Python in Practice", [902, 903], ["Python", "Development"]),
+        ("Rust [Regex] Guide", [903], ["Development"]),
+        ("Python Basics", [901], ["python"]),
+    ]
+    with MongoClient(
+        "mongodb://localhost:27018/?retryWrites=false", serverSelectionTimeoutMS=5_000
+    ) as client:
+        client[e2e_database_name]["authors"].insert_one(
+            {"id": Int64(903), "name": "Bob Gregory", "birth_date": None}
+        )
+    created_books = []
+    for title, author_ids, tags in fixtures:
+        response = api_client.post(
+            "/books",
+            json={
+                "title": title,
+                "publisher": "Filter Press",
+                "author_ids": author_ids,
+                "pages": 100,
+                "tags": tags,
+            },
+        )
+        assert response.status_code == 201, response.text
+        created_books.append(response.json())
+
+    literal_regex = api_client.get("/books", params={"title": "[Regex]"})
+    assert literal_regex.status_code == 200
+    assert [item["title"] for item in literal_regex.json()["items"]] == [
+        "Python [Regex] Guide",
+        "Rust [Regex] Guide",
+    ]
+
+    coauthor = api_client.get("/books", params={"author": "gRaCe"})
+    assert coauthor.status_code == 200
+    assert [item["title"] for item in coauthor.json()["items"]] == ["Python in Practice"]
+
+    and_filters = api_client.get(
+        "/books",
+        params=[
+            ("author", "bob"),
+            ("title", "python"),
+            ("tags", "Python"),
+            ("tags", "Development"),
+        ],
+    )
+    assert and_filters.status_code == 200
+    assert [item["title"] for item in and_filters.json()["items"]] == ["Python in Practice"]
+    assert and_filters.json()["total"] == 1
+
+    tag_case = api_client.get("/books", params=[("tags", "Python"), ("tags", "Development")])
+    assert [item["title"] for item in tag_case.json()["items"]] == [
+        "Python [Regex] Guide",
+        "Python in Practice",
+    ]
+    lower_tag = api_client.get("/books", params={"tags": "python"})
+    assert [item["title"] for item in lower_tag.json()["items"]] == ["Python Basics"]
+
+    page_one = api_client.get("/books", params={"page": 1, "limit": 2})
+    page_two = api_client.get("/books", params={"page": 2, "limit": 2})
+    beyond = api_client.get("/books", params={"page": 3, "limit": 2})
+    deep_page = api_client.get("/books", params={"page": 101, "limit": 2})
+    assert (
+        page_one.status_code
+        == page_two.status_code
+        == beyond.status_code
+        == deep_page.status_code
+        == 200
+    )
+    assert [item["id"] for item in page_one.json()["items"]] == [
+        created_books[0]["id"],
+        created_books[1]["id"],
+    ]
+    assert [item["id"] for item in page_two.json()["items"]] == [
+        created_books[2]["id"],
+        created_books[3]["id"],
+    ]
+    assert page_one.json()["total"] == page_two.json()["total"] == beyond.json()["total"] == 4
+    assert beyond.json()["items"] == []
+    assert deep_page.json() == {"items": [], "page": 101, "limit": 2, "total": 4}
+
+    filtered_page = api_client.get("/books", params={"title": "python", "page": 2, "limit": 1})
+    assert filtered_page.json()["total"] == 3
+    assert [item["title"] for item in filtered_page.json()["items"]] == ["Python in Practice"]
+    filtered_deep_page = api_client.get(
+        "/books", params={"title": "python", "page": 101, "limit": 1}
+    )
+    assert filtered_deep_page.json() == {
+        "items": [],
+        "page": 101,
+        "limit": 1,
+        "total": 3,
+    }
+
+    assert api_client.get("/books", params={"page": 100, "limit": 100}).status_code == 200
+    for params in (
+        {"author": "   "},
+        {"title": "   "},
+        {"tags": "   "},
+        {"page": 0},
+        {"limit": 0},
+        {"limit": 101},
+    ):
+        response = api_client.get("/books", params=params)
+        assert response.status_code == 422, (params, response.text)

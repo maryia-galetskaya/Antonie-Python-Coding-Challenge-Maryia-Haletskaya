@@ -28,6 +28,9 @@ class MongoDatabase:
         authors = self.database["authors"]
         counters = self.database["counters"]
         await books.create_index([("id", ASCENDING)], unique=True, name="books_public_id")
+        await books.create_index([("author_ids", ASCENDING)], name="books_author_ids")
+        await books.create_index([("publisher", ASCENDING)], name="books_publisher")
+        await books.create_index([("tags", ASCENDING)], name="books_tags")
         await authors.create_index([("id", ASCENDING)], unique=True, name="authors_public_id")
         await self._initialize_book_counter(books, authors, counters)
 
