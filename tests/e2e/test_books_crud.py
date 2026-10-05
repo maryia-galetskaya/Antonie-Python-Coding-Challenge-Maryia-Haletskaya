@@ -1,10 +1,16 @@
 """Book CRUD contract exercised over HTTP against the Compose API and MongoDB."""
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+import httpx
 import pytest
 from bson import Int64
-from pymongo import MongoClient
+from pymongo import AsyncMongoClient, MongoClient
+
+from antonie_books.infrastructure.mongo import MongoDatabase
+from antonie_books.infrastructure.repositories import MongoBookIdGenerator
 
 pytestmark = pytest.mark.e2e
 
@@ -89,6 +95,84 @@ def test_book_http_crud_lifecycle(api_client, e2e_database_name: str) -> None:
     assert deleted.content == b""
     assert api_client.delete(create.headers["location"]).status_code == 404
     assert api_client.get(create.headers["location"]).status_code == 404
+
+
+def test_parallel_book_posts_receive_unique_ids(api_client, e2e_database_name: str) -> None:
+    _insert_authors(e2e_database_name)
+    payload = {
+        "title": "Concurrent allocation",
+        "publisher": "Parallel Press",
+        "author_ids": [901],
+        "pages": 100,
+    }
+
+    def post_book(_: int) -> httpx.Response:
+        with httpx.Client(base_url=str(api_client.base_url), timeout=10.0) as client:
+            return client.post("/books", json=payload)
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        responses = list(executor.map(post_book, range(24)))
+
+    assert [response.status_code for response in responses] == [201] * 24, [
+        response.text for response in responses
+    ]
+    public_ids = [response.json()["id"] for response in responses]
+    assert len(set(public_ids)) == len(public_ids)
+
+
+def test_deleted_book_id_is_not_reused(api_client, e2e_database_name: str) -> None:
+    _insert_authors(e2e_database_name)
+    payload = {
+        "title": "Deleted ID reservation",
+        "publisher": "Monotonic Press",
+        "author_ids": [901],
+        "pages": 100,
+    }
+
+    deleted_candidate = api_client.post("/books", json=payload)
+    assert deleted_candidate.status_code == 201, deleted_candidate.text
+    deleted_id = deleted_candidate.json()["id"]
+    deletion = api_client.delete(deleted_candidate.headers["location"])
+    assert deletion.status_code == 204
+
+    replacement = api_client.post("/books", json=payload)
+    assert replacement.status_code == 201, replacement.text
+    assert replacement.json()["id"] != deleted_id
+    assert replacement.json()["id"] > deleted_id
+
+
+@pytest.mark.asyncio
+async def test_counter_survives_fresh_mongo_client_and_prepare(
+    api_client, e2e_database_name: str
+) -> None:
+    _insert_authors(e2e_database_name)
+    created = api_client.post(
+        "/books",
+        json={
+            "title": "Persisted counter",
+            "publisher": "Restart Press",
+            "author_ids": [901],
+            "pages": 100,
+        },
+    )
+    assert created.status_code == 201, created.text
+    created_id = created.json()["id"]
+
+    client = AsyncMongoClient(
+        os.getenv("ANTONIE_BOOKS_MONGO_URI", "mongodb://localhost:27018/?retryWrites=false"),
+        serverSelectionTimeoutMS=5_000,
+        retryWrites=False,
+    )
+    try:
+        database = MongoDatabase(client[e2e_database_name])
+        await database.prepare()
+        allocated_after_reconnect = await MongoBookIdGenerator(
+            database.database["counters"]
+        ).next_id()
+    finally:
+        await client.close()
+
+    assert allocated_after_reconnect > created_id
 
 
 def test_book_http_errors_and_strict_validation(api_client, e2e_database_name: str) -> None:
