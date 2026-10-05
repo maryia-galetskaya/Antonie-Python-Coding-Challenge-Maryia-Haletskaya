@@ -119,7 +119,7 @@ def test_book_http_errors_and_strict_validation(api_client, e2e_database_name: s
         assert response.status_code == 422, (invalid, response.text)
 
     unknown_author = api_client.post("/books", json={**payload, "author_ids": [999_999]})
-    assert unknown_author.status_code == 422
+    assert unknown_author.status_code == 404
     assert unknown_author.json()["error"]["code"] == "author_not_found"
 
     created = api_client.post("/books", json=payload)
@@ -128,7 +128,7 @@ def test_book_http_errors_and_strict_validation(api_client, e2e_database_name: s
     original_book = created.json()
 
     unknown_author_patch = api_client.patch(location, json={"author_ids": [999_999]})
-    assert unknown_author_patch.status_code == 422
+    assert unknown_author_patch.status_code == 404
     assert unknown_author_patch.json()["error"]["code"] == "author_not_found"
     unchanged_book = api_client.get(location)
     assert unchanged_book.status_code == 200

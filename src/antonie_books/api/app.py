@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from antonie_books.api.books import router as books_router
 from antonie_books.api.config import Settings
 from antonie_books.api.errors import register_exception_handlers
+from antonie_books.api.reports import authors_router, publishers_router
 from antonie_books.application.services import AuthorService, BookService, PublisherService
 from antonie_books.infrastructure.mongo import connect_mongo
 from antonie_books.infrastructure.repositories import (
@@ -72,6 +73,8 @@ def create_app(
     app.state.use_mongo_services = container is None
     register_exception_handlers(app)
     app.include_router(books_router)
+    app.include_router(authors_router)
+    app.include_router(publishers_router)
 
     return app
 

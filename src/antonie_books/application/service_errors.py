@@ -23,4 +23,13 @@ class AuthorNotFoundError(DomainError):
         super().__init__(f"Author(s) {ids} were not found")
 
 
-__all__ = ["AuthorNotFoundError", "BookNotFoundError"]
+class PublisherNotFoundError(DomainError):
+    """No books exist for a requested publisher name."""
+
+    code = "publisher_not_found"
+
+    def __init__(self, publisher: str) -> None:
+        super().__init__(f"Publisher {publisher!r} was not found")
+
+
+__all__ = ["AuthorNotFoundError", "BookNotFoundError", "PublisherNotFoundError"]
