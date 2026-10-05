@@ -12,7 +12,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-dev --no-install-project
 
 COPY src ./src
-RUN uv sync --locked --no-dev
+RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.14.8-slim AS runtime
 
