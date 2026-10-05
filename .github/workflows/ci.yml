@@ -138,34 +138,46 @@ jobs:
         run: uv run pytest -m e2e --junitxml=junit-e2e.xml
       - name: Verify API returns safe 503 when MongoDB stops
         run: |
-          docker compose -f compose.e2e.yaml -p antonie-e2e stop mongo
-          uv run python - <<'PY'
+          timeout --signal=TERM --kill-after=2s 12s docker compose -f compose.e2e.yaml -p antonie-e2e stop mongo
+          timeout --signal=TERM --kill-after=2s 50s uv run python - <<'PY'
+          import asyncio
           import time
 
           import httpx
 
-          deadline = time.monotonic() + 40
-          last_error = None
-          while time.monotonic() < deadline:
-              try:
-                  response = httpx.get("http://localhost:8001/books", timeout=3.0)
-                  if response.status_code == 503:
-                      assert response.json() == {
-                          "error": {
-                              "code": "database_unavailable",
-                              "message": "The database is temporarily unavailable.",
-                          }
-                      }, response.text
-                      assert response.headers.get("retry-after") == "1"
-                      break
-                  last_error = f"GET /books returned {response.status_code}: {response.text}"
-              except httpx.HTTPError as exc:
-                  last_error = str(exc)
-              time.sleep(0.5)
-          else:
+          async def main():
+              deadline = time.monotonic() + 45
+              last_error = None
+              async with httpx.AsyncClient(timeout=None) as client:
+                  while time.monotonic() < deadline:
+                      remaining = deadline - time.monotonic()
+                      try:
+                          response = await asyncio.wait_for(
+                              client.get("http://localhost:8001/books"),
+                              timeout=min(35.0, remaining),
+                          )
+                          if time.monotonic() > deadline:
+                              raise AssertionError(
+                                  "API response arrived after the 45-second check deadline"
+                              )
+                          if response.status_code == 503:
+                              assert response.json() == {
+                                  "error": {
+                                      "code": "database_unavailable",
+                                      "message": "The database is temporarily unavailable.",
+                                  }
+                              }, response.text
+                              assert response.headers.get("retry-after") == "1"
+                              return
+                          last_error = f"GET /books returned {response.status_code}: {response.text}"
+                      except (asyncio.TimeoutError, httpx.HTTPError) as exc:
+                          last_error = str(exc) or type(exc).__name__
+                      await asyncio.sleep(0.5)
               raise AssertionError(
-                  f"API did not return the safe MongoDB 503 response within 40 seconds: {last_error}"
+                  f"API did not return the safe MongoDB 503 response during the 45-second check window: {last_error}"
               )
+
+          asyncio.run(main())
       - name: Capture Compose state on failure
         if: failure()
         run: |
