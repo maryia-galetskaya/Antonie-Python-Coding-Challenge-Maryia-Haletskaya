@@ -12,6 +12,9 @@ dependencies = [
     "uvicorn[standard]>=0.34,<1",
 ]
 
+[project.scripts]
+antonie-books-seed = "antonie_books.infrastructure.seed:main"
+
 [dependency-groups]
 dev = [
     "httpx>=0.28,<1",
