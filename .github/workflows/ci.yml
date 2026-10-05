@@ -136,6 +136,36 @@ jobs:
           ANTONIE_BOOKS_MONGO_URI: mongodb://localhost:27018/?retryWrites=false
           ANTONIE_BOOKS_MONGO_DATABASE: antonie_e2e_books
         run: uv run pytest -m e2e --junitxml=junit-e2e.xml
+      - name: Verify API returns safe 503 when MongoDB stops
+        run: |
+          docker compose -f compose.e2e.yaml -p antonie-e2e stop mongo
+          uv run python - <<'PY'
+          import time
+
+          import httpx
+
+          deadline = time.monotonic() + 40
+          last_error = None
+          while time.monotonic() < deadline:
+              try:
+                  response = httpx.get("http://localhost:8001/books", timeout=3.0)
+                  if response.status_code == 503:
+                      assert response.json() == {
+                          "error": {
+                              "code": "database_unavailable",
+                              "message": "The database is temporarily unavailable.",
+                          }
+                      }, response.text
+                      assert response.headers.get("retry-after") == "1"
+                      break
+                  last_error = f"GET /books returned {response.status_code}: {response.text}"
+              except httpx.HTTPError as exc:
+                  last_error = str(exc)
+              time.sleep(0.5)
+          else:
+              raise AssertionError(
+                  f"API did not return the safe MongoDB 503 response within 40 seconds: {last_error}"
+              )
       - name: Capture Compose state on failure
         if: failure()
         run: |

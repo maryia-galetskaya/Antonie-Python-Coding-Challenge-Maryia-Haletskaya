@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, call
 import pytest
 from bson import Int64
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 from antonie_books.application.commands import UpdateBookCommand
 from antonie_books.application.filters import BookFilter
@@ -23,6 +24,8 @@ from antonie_books.infrastructure.repositories import (
     MongoBookIdGenerator,
     MongoBookRepository,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def test_author_mapping_stores_int64_and_round_trips_date() -> None:
@@ -146,6 +149,26 @@ async def test_counter_is_initialized_only_when_books_collection_is_empty() -> N
     await database._initialize_book_counter(books, authors, counters)
 
     counters.insert_one.assert_awaited_once_with({"_id": "books", "seq": Int64(0)})
+
+
+@pytest.mark.asyncio
+async def test_counter_initialization_race_rereads_duplicate_insert_winner() -> None:
+    books = AsyncMock()
+    authors = AsyncMock()
+    counters = AsyncMock()
+    books.find_one.return_value = None
+    authors.find_one.return_value = None
+    counters.find_one.side_effect = [None, {"_id": "books", "seq": Int64(0)}]
+    counters.insert_one.side_effect = DuplicateKeyError("counter was initialized concurrently")
+    database = MongoDatabase({"books": books, "authors": authors, "counters": counters})
+
+    await database._initialize_book_counter(books, authors, counters)
+
+    counters.insert_one.assert_awaited_once_with({"_id": "books", "seq": Int64(0)})
+    assert counters.find_one.await_args_list == [
+        call({"_id": "books"}),
+        call({"_id": "books"}),
+    ]
 
 
 @pytest.mark.asyncio
