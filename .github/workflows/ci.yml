@@ -178,6 +178,7 @@ jobs:
               )
 
           asyncio.run(main())
+          PY
       - name: Capture Compose state on failure
         if: failure()
         run: |
