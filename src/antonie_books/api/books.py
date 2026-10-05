@@ -69,10 +69,22 @@ async def create_book(
 @router.get("", response_model=BookPageResponse)
 async def list_books(
     service: Annotated[BookService, Depends(get_book_service)],
+    author: Annotated[str | None, Query()] = None,
+    title: Annotated[str | None, Query()] = None,
+    tags: Annotated[list[str] | None, Query()] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> BookPageResponse:
-    return _page_response(await service.list(BookFilter(page=PageRequest(page, limit))))
+    return _page_response(
+        await service.list(
+            BookFilter(
+                author=author,
+                title=title,
+                tags=tuple(tags or ()),
+                page=PageRequest(page, limit),
+            )
+        )
+    )
 
 
 @router.get("/{book_id}", response_model=BookResponse)

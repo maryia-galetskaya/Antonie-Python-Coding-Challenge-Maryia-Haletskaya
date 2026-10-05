@@ -1,13 +1,14 @@
 """Unit coverage for MongoDB mapping and ID allocation contracts."""
 
 from datetime import UTC, date, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 from bson import Int64
 from pymongo import ReturnDocument
 
 from antonie_books.application.commands import UpdateBookCommand
+from antonie_books.application.filters import BookFilter
 from antonie_books.domain.models import Author, Book
 from antonie_books.infrastructure.mappers import (
     author_from_document,
@@ -135,3 +136,47 @@ async def test_missing_counter_with_authors_but_no_books_fails_without_reconstru
         await database._initialize_book_counter(books, authors, counters)
 
     counters.insert_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_book_filter_query_escapes_regex_and_combines_all_filters_with_and() -> None:
+    collection = AsyncMock()
+    authors = AsyncMock()
+    authors.distinct.return_value = [Int64(4), Int64(9)]
+    repository = MongoBookRepository(collection, authors)
+
+    query = await repository._filter_query(
+        BookFilter(author="Ada.+", title="[Python]", tags=("Python", "Development"))
+    )
+
+    assert query == {
+        "$and": [
+            {"title": {"$regex": r"\[Python\]", "$options": "i"}},
+            {"author_ids": {"$in": [Int64(4), Int64(9)]}},
+            {"tags": {"$all": ["Python", "Development"]}},
+        ]
+    }
+    authors.distinct.assert_awaited_once_with(
+        "id", {"name": {"$regex": r"Ada\.\+", "$options": "i"}}
+    )
+
+
+@pytest.mark.asyncio
+async def test_mongo_prepare_creates_filter_indexes_and_unique_public_id_indexes() -> None:
+    books = AsyncMock()
+    authors = AsyncMock()
+    counters = AsyncMock()
+    counters.find_one.return_value = {"_id": "books", "seq": Int64(0)}
+    database = MongoDatabase({"books": books, "authors": authors, "counters": counters})
+
+    await database.prepare()
+
+    assert books.create_index.await_args_list == [
+        call([("id", 1)], unique=True, name="books_public_id"),
+        call([("author_ids", 1)], name="books_author_ids"),
+        call([("publisher", 1)], name="books_publisher"),
+        call([("tags", 1)], name="books_tags"),
+    ]
+    authors.create_index.assert_awaited_once_with(
+        [("id", 1)], unique=True, name="authors_public_id"
+    )
