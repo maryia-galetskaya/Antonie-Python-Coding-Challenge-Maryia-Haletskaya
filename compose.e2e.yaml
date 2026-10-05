@@ -1,0 +1,21 @@
+name: antonie-books-e2e
+
+services:
+  api:
+    build:
+      context: .
+    environment:
+      ANTONIE_BOOKS_MONGO_URI: mongodb://mongo:27017/?retryWrites=false
+      ANTONIE_BOOKS_MONGO_DATABASE: antonie_e2e_books
+    ports:
+      - "8001:8000"
+    depends_on:
+      - mongo
+
+  mongo:
+    image: mongo:8.0
+    command: ["mongod", "--bind_ip_all"]
+    ports:
+      - "27018:27017"
+    tmpfs:
+      - /data/db
