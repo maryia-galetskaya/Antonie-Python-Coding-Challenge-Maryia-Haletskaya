@@ -23,6 +23,17 @@ class AuthorNotFoundError(DomainError):
         super().__init__(f"Author(s) {ids} were not found")
 
 
+class UnknownBookAuthorError(DomainError):
+    """A book references one or more authors that do not exist."""
+
+    code = "author_not_found"
+
+    def __init__(self, author_ids: tuple[int, ...]) -> None:
+        self.author_ids = author_ids
+        ids = ", ".join(str(author_id) for author_id in author_ids)
+        super().__init__(f"Author(s) {ids} were not found")
+
+
 class PublisherNotFoundError(DomainError):
     """No books exist for a requested publisher name."""
 
@@ -32,4 +43,9 @@ class PublisherNotFoundError(DomainError):
         super().__init__(f"Publisher {publisher!r} was not found")
 
 
-__all__ = ["AuthorNotFoundError", "BookNotFoundError", "PublisherNotFoundError"]
+__all__ = [
+    "AuthorNotFoundError",
+    "BookNotFoundError",
+    "PublisherNotFoundError",
+    "UnknownBookAuthorError",
+]
