@@ -1,7 +1,7 @@
 """MongoDB implementations of the application repository ports."""
 
-from datetime import datetime
 import re
+from datetime import datetime
 from functools import wraps
 from typing import Any
 

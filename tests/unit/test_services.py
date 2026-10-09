@@ -3,10 +3,6 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from antonie_books.application.errors import (
-    BookNotFoundError,
-    UnknownBookAuthorError,
-)
 from antonie_books.application.dto import (
     AuthorOutput,
     BookIdInput,
@@ -14,6 +10,10 @@ from antonie_books.application.dto import (
     ListAuthorBooksInput,
     ListBooksInput,
     UpdateBookInput,
+)
+from antonie_books.application.errors import (
+    BookNotFoundError,
+    UnknownBookAuthorError,
 )
 from antonie_books.application.services import AuthorService, BookService
 from antonie_books.domain.models import Author, Book
