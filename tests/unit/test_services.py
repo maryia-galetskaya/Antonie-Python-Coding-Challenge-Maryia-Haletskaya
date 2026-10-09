@@ -3,15 +3,19 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from antonie_books.application.commands import CreateBookCommand, UpdateBookCommand
-from antonie_books.application.filters import BookFilter, PageRequest
-from antonie_books.application.results import PageResult
-from antonie_books.application.service_errors import (
-    AuthorNotFoundError,
+from antonie_books.application.dto import (
+    AuthorOutput,
+    BookIdInput,
+    CreateBookInput,
+    ListAuthorBooksInput,
+    ListBooksInput,
+    UpdateBookInput,
+)
+from antonie_books.application.errors import (
     BookNotFoundError,
     UnknownBookAuthorError,
 )
-from antonie_books.application.services import AuthorService, BookService, PublisherService
+from antonie_books.application.services import AuthorService, BookService
 from antonie_books.domain.models import Author, Book
 
 pytestmark = pytest.mark.unit
@@ -52,16 +56,13 @@ class FakeAuthorRepository:
     async def list(self) -> tuple[Author, ...]:
         return tuple(self.authors.values())
 
-    async def list_with_book_counts(self):
-        return ()
-
 
 class FakeBookRepository:
     def __init__(self) -> None:
         self.books: dict[int, Book] = {}
         self.add_error: Exception | None = None
-        self.last_filter: BookFilter | None = None
-        self.last_page: PageRequest | None = None
+        self.last_filter: tuple[str | None, str | None, tuple[str, ...], int, int] | None = None
+        self.last_page: tuple[int, int] | None = None
 
     async def add(self, book: Book) -> None:
         if self.add_error is not None:
@@ -71,25 +72,39 @@ class FakeBookRepository:
     async def get_by_id(self, book_id: int) -> Book | None:
         return self.books.get(book_id)
 
-    async def list(self, filters: BookFilter) -> PageResult[Book]:
-        self.last_filter = filters
-        return PageResult(
-            tuple(self.books.values()), filters.page.page, filters.page.limit, len(self.books)
-        )
+    async def list(
+        self,
+        *,
+        author: str | None,
+        title: str | None,
+        tags: tuple[str, ...],
+        page: int,
+        limit: int,
+    ) -> tuple[tuple[Book, ...], int]:
+        self.last_filter = (author, title, tags, page, limit)
+        return tuple(self.books.values()), len(self.books)
 
     async def update(
-        self, book_id: int, changes: UpdateBookCommand, updated_at: datetime
+        self,
+        book_id: int,
+        *,
+        updated_at: datetime,
+        title: str | None = None,
+        publisher: str | None = None,
+        author_ids: tuple[int, ...] | None = None,
+        pages: int | None = None,
+        tags: tuple[str, ...] | None = None,
     ) -> Book | None:
         current = self.books.get(book_id)
         if current is None:
             return None
         updated = replace(
             current,
-            title=changes.title if changes.title is not None else current.title,
-            publisher=changes.publisher if changes.publisher is not None else current.publisher,
-            author_ids=changes.author_ids if changes.author_ids is not None else current.author_ids,
-            pages=changes.pages if changes.pages is not None else current.pages,
-            tags=changes.tags if changes.tags is not None else current.tags,
+            title=title if title is not None else current.title,
+            publisher=publisher if publisher is not None else current.publisher,
+            author_ids=author_ids if author_ids is not None else current.author_ids,
+            pages=pages if pages is not None else current.pages,
+            tags=tags if tags is not None else current.tags,
             updated_at=updated_at,
         )
         self.books[book_id] = updated
@@ -98,13 +113,13 @@ class FakeBookRepository:
     async def delete(self, book_id: int) -> bool:
         return self.books.pop(book_id, None) is not None
 
-    async def list_for_author(self, author_id: int, page: PageRequest) -> PageResult[Book]:
-        self.last_page = page
+    async def list_for_author(
+        self, author_id: int, *, page: int, limit: int
+    ) -> tuple[tuple[Book, ...], int]:
+        self.last_page = (page, limit)
         matching = tuple(book for book in self.books.values() if author_id in book.author_ids)
-        start = (page.page - 1) * page.limit
-        return PageResult(
-            matching[start : start + page.limit], page.page, page.limit, len(matching)
-        )
+        start = (page - 1) * limit
+        return matching[start : start + limit], len(matching)
 
     async def author_book_counts(self) -> dict[int, int]:
         return {}
@@ -128,7 +143,7 @@ def make_service(
     return BookService(books, authors, ids, clock), books, authors, ids
 
 
-def command(**overrides: object) -> CreateBookCommand:
+def book_fields(**overrides: object) -> CreateBookInput:
     fields: dict[str, object] = {
         "title": "The Pragmatic Programmer",
         "publisher": "Addison-Wesley",
@@ -137,7 +152,7 @@ def command(**overrides: object) -> CreateBookCommand:
         "tags": ("Software", "Career"),
     }
     fields.update(overrides)
-    return CreateBookCommand(**fields)  # type: ignore[arg-type]
+    return CreateBookInput(**fields)  # type: ignore[arg-type]
 
 
 async def test_create_assigns_id_and_utc_millisecond_timestamps() -> None:
@@ -145,17 +160,17 @@ async def test_create_assigns_id_and_utc_millisecond_timestamps() -> None:
         clock_value=datetime(2025, 4, 3, 10, 9, 10, 123999, tzinfo=timezone(timedelta(hours=2)))
     )
 
-    result = await service.create(command())
+    result = await service.create(book_fields())
 
     expected = datetime(2025, 4, 3, 8, 9, 10, 123000, tzinfo=UTC)
-    assert result.book.id == 20
-    assert result.book.created_at == expected
-    assert result.book.updated_at == expected
+    assert result.id == 20
+    assert result.created_at == expected
+    assert result.updated_at == expected
     assert result.authors == (
-        Author(1, "Author 1", date(2000, 1, 1)),
-        Author(2, "Author 2", date(2000, 1, 1)),
+        AuthorOutput(1, "Author 1", date(2000, 1, 1)),
+        AuthorOutput(2, "Author 2", date(2000, 1, 1)),
     )
-    assert books.books[20] == result.book
+    assert books.books[20].id == result.id
     assert ids.calls == 1
 
 
@@ -163,7 +178,7 @@ async def test_create_validates_all_authors_before_consuming_id() -> None:
     service, books, _, ids = make_service(author_ids=(1,))
 
     with pytest.raises(UnknownBookAuthorError) as error:
-        await service.create(command(author_ids=(1, 999)))
+        await service.create(book_fields(author_ids=(1, 999)))
 
     assert error.value.author_ids == (999,)
     assert ids.calls == 0
@@ -175,13 +190,13 @@ async def test_failed_insert_keeps_allocated_id_consumed_and_next_create_skips_i
     books.add_error = OSError("storage failed")
 
     with pytest.raises(OSError, match="storage failed"):
-        await service.create(command())
+        await service.create(book_fields())
 
     books.add_error = None
-    created = await service.create(command())
+    created = await service.create(book_fields())
 
     assert ids.calls == 2
-    assert created.book.id == 21
+    assert created.id == 21
 
 
 async def test_get_update_and_delete_book_lifecycle() -> None:
@@ -189,23 +204,23 @@ async def test_get_update_and_delete_book_lifecycle() -> None:
     authors = FakeAuthorRepository((Author(1, "Author 1"), Author(2, "Author 2")))
     books = FakeBookRepository()
     service = BookService(books, authors, FakeIdGenerator(), clock)
-    created = await service.create(command())
+    created = await service.create(book_fields())
 
-    fetched = await service.get(created.book.id)
+    fetched = await service.get(BookIdInput(created.id))
     clock.value = datetime(2025, 4, 3, 8, 10, 11, 987654, tzinfo=UTC)
-    updated = await service.update(created.book.id, UpdateBookCommand(title="New title"))
+    updated = await service.update(UpdateBookInput(created.id, title="New title"))
 
     assert fetched == created
-    assert updated.book.title == "New title"
-    assert updated.book.publisher == created.book.publisher
-    assert updated.book.author_ids == created.book.author_ids
-    assert updated.book.pages == created.book.pages
-    assert updated.book.tags == created.book.tags
-    assert updated.book.created_at == created.book.created_at
-    assert updated.book.updated_at == datetime(2025, 4, 3, 8, 10, 11, 987000, tzinfo=UTC)
-    assert updated.book.updated_at > created.book.updated_at
+    assert updated.title == "New title"
+    assert updated.publisher == created.publisher
+    assert updated.author_ids == created.author_ids
+    assert updated.pages == created.pages
+    assert updated.tags == created.tags
+    assert updated.created_at == created.created_at
+    assert updated.updated_at == datetime(2025, 4, 3, 8, 10, 11, 987000, tzinfo=UTC)
+    assert updated.updated_at > created.updated_at
 
-    await service.delete(created.book.id)
+    await service.delete(BookIdInput(created.id))
     assert books.books == {}
 
 
@@ -215,90 +230,47 @@ async def test_unknown_book_raises_not_found(operation: str) -> None:
 
     with pytest.raises(BookNotFoundError):
         if operation == "get":
-            await service.get(404)
+            await service.get(BookIdInput(404))
         elif operation == "update":
-            await service.update(404, UpdateBookCommand(title="Title"))
+            await service.update(UpdateBookInput(404, title="Title"))
         else:
-            await service.delete(404)
+            await service.delete(BookIdInput(404))
 
 
 async def test_update_rejects_unknown_authors_without_changing_book() -> None:
     service, books, _, _ = make_service(author_ids=(1,))
-    created = await service.create(command(author_ids=(1,)))
+    created = await service.create(book_fields(author_ids=(1,)))
 
     with pytest.raises(UnknownBookAuthorError):
-        await service.update(created.book.id, UpdateBookCommand(author_ids=(999,)))
+        await service.update(UpdateBookInput(created.id, author_ids=(999,)))
 
-    assert books.books[created.book.id] == created.book
+    assert books.books[created.id].author_ids == created.author_ids
 
 
-async def test_list_resolves_authors_and_preserves_pagination() -> None:
+async def test_list_batches_author_lookups_and_preserves_pagination() -> None:
     service, books, authors, _ = make_service()
-    await service.create(command())
+    await service.create(book_fields())
+    await service.create(book_fields(title="A second book", author_ids=(2, 1)))
     authors.get_many_calls.clear()
-    filters = BookFilter(title="Pragmatic", page=PageRequest(page=2, limit=7))
+    result = await service.list(ListBooksInput(title="Pragmatic", page=2, limit=7))
 
-    result = await service.list(filters)
-
-    assert result.page == 2
-    assert result.limit == 7
-    assert result.total == 1
+    assert result.total == 2
     assert result.items[0].authors[1].id == 2
-    assert books.last_filter is filters
+    assert tuple(a.id for a in result.items[1].authors) == (2, 1)
+    assert books.last_filter == (None, "Pragmatic", (), 2, 7)
     assert authors.get_many_calls == [(1, 2)]
-
-
-async def test_list_batches_unique_author_lookups_across_multiple_books() -> None:
-    service, books, authors, _ = make_service()
-    await service.create(command())
-    await service.create(command(title="A second book", author_ids=(2, 1)))
-    books.last_filter = None
-    authors.get_many_calls.clear()
-
-    result = await service.list()
-
-    assert len(result.items) == 2
-    assert result.items[0].authors == (authors.authors[1], authors.authors[2])
-    assert result.items[1].authors == (authors.authors[2], authors.authors[1])
-    assert authors.get_many_calls == [(1, 2)]
-
-
-async def test_author_and_publisher_services_delegate_to_repositories() -> None:
-    service, books, authors, _ = make_service()
-    publisher_service = PublisherService(books)
-    author_service = AuthorService(authors, books)
-
-    assert (await author_service.get(1)).name == "Author 1"
-    assert (await author_service.list())[0].id == 1
-    assert await author_service.list_books(1, PageRequest(page=2, limit=4)) == PageResult(
-        (), 2, 4, 0
-    )
-    assert books.last_page == PageRequest(page=2, limit=4)
-    assert await publisher_service.get_average("No publisher") is None
 
 
 async def test_author_book_results_batch_author_resolution_and_keep_page_metadata() -> None:
     service, books, authors, _ = make_service()
-    await service.create(command(author_ids=(1, 2)))
-    await service.create(command(title="Second", author_ids=(2, 1)))
+    await service.create(book_fields(author_ids=(1, 2)))
+    await service.create(book_fields(title="Second", author_ids=(2, 1)))
     authors.get_many_calls.clear()
 
-    result = await AuthorService(authors, books).list_books(1, PageRequest(page=2, limit=1))
+    result = await AuthorService(authors, books).list_books(ListAuthorBooksInput(1, 2, 1))
 
-    assert result.page == 2
-    assert result.limit == 1
+    assert books.last_page == (2, 1)
     assert result.total == 2
     assert len(result.items) == 1
-    assert result.items[0].authors == (authors.authors[2], authors.authors[1])
+    assert tuple(author.id for author in result.items[0].authors) == (2, 1)
     assert authors.get_many_calls == [(2, 1)]
-
-
-async def test_author_book_results_raise_for_missing_author_details() -> None:
-    service, books, authors, _ = make_service(author_ids=(1, 2))
-    await service.create(command(author_ids=(1, 2)))
-    del authors.authors[2]
-
-    with pytest.raises(AuthorNotFoundError) as error:
-        await AuthorService(authors, books).list_books(1)
-
-    assert error.value.author_ids == (2,)

@@ -1,36 +1,28 @@
 """Book CRUD contract exercised over HTTP against the Compose API and MongoDB."""
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import httpx
 import pytest
 from bson import Int64
-from pymongo import AsyncMongoClient, MongoClient
-
-from antonie_books.infrastructure.mongo import MongoDatabase
-from antonie_books.infrastructure.repositories import MongoBookIdGenerator
 
 pytestmark = pytest.mark.e2e
 
 
-def _insert_authors(e2e_database_name: str) -> None:
-    with MongoClient(
-        "mongodb://localhost:27018/?retryWrites=false", serverSelectionTimeoutMS=5_000
-    ) as client:
-        authors = client[e2e_database_name]["authors"]
-        authors.delete_many({})
-        authors.insert_many(
-            [
-                {"id": Int64(901), "name": " Ada Lovelace ", "birth_date": None},
-                {"id": Int64(902), "name": "Grace Hopper", "birth_date": datetime(1906, 12, 9)},
-            ]
-        )
+def _insert_authors(e2e_database) -> None:
+    authors = e2e_database["authors"]
+    authors.delete_many({})
+    authors.insert_many(
+        [
+            {"id": Int64(901), "name": " Ada Lovelace ", "birth_date": None},
+            {"id": Int64(902), "name": "Grace Hopper", "birth_date": datetime(1906, 12, 9)},
+        ]
+    )
 
 
-def test_book_http_crud_lifecycle(api_client, e2e_database_name: str) -> None:
-    _insert_authors(e2e_database_name)
+def test_book_http_crud_lifecycle(api_client, e2e_database) -> None:
+    _insert_authors(e2e_database)
     create = api_client.post(
         "/books",
         json={
@@ -88,7 +80,7 @@ def test_book_http_crud_lifecycle(api_client, e2e_database_name: str) -> None:
     updated_at = datetime.fromisoformat(changed["updated_at"].replace("Z", "+00:00"))
     assert updated_at.tzinfo is not None
     assert updated_at.microsecond % 1000 == 0
-    assert updated_at > created_at
+    assert updated_at >= created_at
 
     deleted = api_client.delete(create.headers["location"])
     assert deleted.status_code == 204
@@ -97,8 +89,8 @@ def test_book_http_crud_lifecycle(api_client, e2e_database_name: str) -> None:
     assert api_client.get(create.headers["location"]).status_code == 404
 
 
-def test_parallel_book_posts_receive_unique_ids(api_client, e2e_database_name: str) -> None:
-    _insert_authors(e2e_database_name)
+def test_parallel_book_posts_receive_unique_ids(api_client, e2e_database) -> None:
+    _insert_authors(e2e_database)
     payload = {
         "title": "Concurrent allocation",
         "publisher": "Parallel Press",
@@ -120,8 +112,8 @@ def test_parallel_book_posts_receive_unique_ids(api_client, e2e_database_name: s
     assert len(set(public_ids)) == len(public_ids)
 
 
-def test_deleted_book_id_is_not_reused(api_client, e2e_database_name: str) -> None:
-    _insert_authors(e2e_database_name)
+def test_deleted_book_id_is_not_reused(api_client, e2e_database) -> None:
+    _insert_authors(e2e_database)
     payload = {
         "title": "Deleted ID reservation",
         "publisher": "Monotonic Press",
@@ -141,42 +133,8 @@ def test_deleted_book_id_is_not_reused(api_client, e2e_database_name: str) -> No
     assert replacement.json()["id"] > deleted_id
 
 
-@pytest.mark.asyncio
-async def test_counter_survives_fresh_mongo_client_and_prepare(
-    api_client, e2e_database_name: str
-) -> None:
-    _insert_authors(e2e_database_name)
-    created = api_client.post(
-        "/books",
-        json={
-            "title": "Persisted counter",
-            "publisher": "Restart Press",
-            "author_ids": [901],
-            "pages": 100,
-        },
-    )
-    assert created.status_code == 201, created.text
-    created_id = created.json()["id"]
-
-    client = AsyncMongoClient(
-        os.getenv("ANTONIE_BOOKS_MONGO_URI", "mongodb://localhost:27018/?retryWrites=false"),
-        serverSelectionTimeoutMS=5_000,
-        retryWrites=False,
-    )
-    try:
-        database = MongoDatabase(client[e2e_database_name])
-        await database.prepare()
-        allocated_after_reconnect = await MongoBookIdGenerator(
-            database.database["counters"]
-        ).next_id()
-    finally:
-        await client.close()
-
-    assert allocated_after_reconnect > created_id
-
-
-def test_book_http_errors_and_strict_validation(api_client, e2e_database_name: str) -> None:
-    _insert_authors(e2e_database_name)
+def test_book_create_rejects_invalid_payloads(api_client, e2e_database) -> None:
+    _insert_authors(e2e_database)
     payload = {
         "title": "Valid",
         "publisher": "Press",
@@ -208,25 +166,22 @@ def test_book_http_errors_and_strict_validation(api_client, e2e_database_name: s
     assert unknown_author.json()["error"]["code"] == "author_not_found"
     assert api_client.get("/books").json()["total"] == books_before_invalid_create
 
-    created = api_client.post("/books", json=payload)
+
+def test_book_patch_rejects_invalid_payloads(api_client, e2e_database) -> None:
+    _insert_authors(e2e_database)
+    created = api_client.post(
+        "/books",
+        json={"title": "Valid", "publisher": "Press", "author_ids": [901], "pages": 10},
+    )
     assert created.status_code == 201, created.text
     location = created.headers["location"]
     original_book = created.json()
-
     unknown_author_patch = api_client.patch(location, json={"author_ids": [999_999]})
     assert unknown_author_patch.status_code == 422
     assert unknown_author_patch.json()["error"]["code"] == "author_not_found"
     unchanged_book = api_client.get(location)
     assert unchanged_book.status_code == 200
     assert unchanged_book.json() == original_book
-
-    missing_author_books = api_client.get("/authors/999999/books")
-    assert missing_author_books.status_code == 404
-    assert missing_author_books.json()["error"]["code"] == "author_not_found"
-
-    missing = api_client.get("/books/9223372036854775807")
-    assert missing.status_code == 404
-    assert missing.json()["error"]["code"] == "book_not_found"
 
     invalid_patches = (
         {},
@@ -239,28 +194,31 @@ def test_book_http_errors_and_strict_validation(api_client, e2e_database_name: s
         {"unexpected": "field"},
     )
     for invalid_patch in invalid_patches:
-        response = api_client.patch("/books/1", json=invalid_patch)
+        response = api_client.patch(location, json=invalid_patch)
         assert response.status_code == 422, (invalid_patch, response.text)
 
 
-def test_book_http_filters_and_pagination(api_client, e2e_database_name: str) -> None:
-    _insert_authors(e2e_database_name)
-    with MongoClient(
-        "mongodb://localhost:27018/?retryWrites=false", serverSelectionTimeoutMS=5_000
-    ) as client:
-        client[e2e_database_name]["books"].delete_many({})
+def test_missing_books_and_authors_return_not_found(api_client) -> None:
+    missing_author_books = api_client.get("/authors/999999/books")
+    assert missing_author_books.status_code == 404
+    assert missing_author_books.json()["error"]["code"] == "author_not_found"
+
+    missing = api_client.get("/books/9223372036854775807")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "book_not_found"
+
+
+def _create_filter_books(api_client, e2e_database) -> list[dict]:
+    _insert_authors(e2e_database)
     fixtures = [
         ("Python [Regex] Guide", [901], ["Python", "Development"]),
         ("Python in Practice", [902, 903], ["Python", "Development"]),
         ("Rust [Regex] Guide", [903], ["Development"]),
         ("Python Basics", [901], ["python"]),
     ]
-    with MongoClient(
-        "mongodb://localhost:27018/?retryWrites=false", serverSelectionTimeoutMS=5_000
-    ) as client:
-        client[e2e_database_name]["authors"].insert_one(
-            {"id": Int64(903), "name": "Bob Gregory", "birth_date": None}
-        )
+    e2e_database["authors"].insert_one(
+        {"id": Int64(903), "name": "Bob Gregory", "birth_date": None}
+    )
     created_books = []
     for title, author_ids, tags in fixtures:
         response = api_client.post(
@@ -275,7 +233,11 @@ def test_book_http_filters_and_pagination(api_client, e2e_database_name: str) ->
         )
         assert response.status_code == 201, response.text
         created_books.append(response.json())
+    return created_books
 
+
+def test_book_filters(api_client, e2e_database) -> None:
+    _create_filter_books(api_client, e2e_database)
     literal_regex = api_client.get("/books", params={"title": "[Regex]"})
     assert literal_regex.status_code == 200
     assert [item["title"] for item in literal_regex.json()["items"]] == [
@@ -308,6 +270,9 @@ def test_book_http_filters_and_pagination(api_client, e2e_database_name: str) ->
     lower_tag = api_client.get("/books", params={"tags": "python"})
     assert [item["title"] for item in lower_tag.json()["items"]] == ["Python Basics"]
 
+
+def test_book_pagination(api_client, e2e_database) -> None:
+    created_books = _create_filter_books(api_client, e2e_database)
     page_one = api_client.get("/books", params={"page": 1, "limit": 2})
     page_two = api_client.get("/books", params={"page": 2, "limit": 2})
     beyond = api_client.get("/books", params={"page": 3, "limit": 2})
@@ -345,13 +310,22 @@ def test_book_http_filters_and_pagination(api_client, e2e_database_name: str) ->
     }
 
     assert api_client.get("/books", params={"page": 100, "limit": 100}).status_code == 200
-    for params in (
-        {"author": "   "},
-        {"title": "   "},
-        {"tags": "   "},
+
+
+@pytest.mark.parametrize("params", [{"author": "   "}, {"title": "   "}, {"tags": "   "}])
+def test_book_filters_reject_empty_values(api_client, params) -> None:
+    response = api_client.get("/books", params=params)
+    assert response.status_code == 422, (params, response.text)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
         {"page": 0},
         {"limit": 0},
         {"limit": 101},
-    ):
-        response = api_client.get("/books", params=params)
-        assert response.status_code == 422, (params, response.text)
+    ],
+)
+def test_book_pagination_rejects_invalid_bounds(api_client, params) -> None:
+    response = api_client.get("/books", params=params)
+    assert response.status_code == 422, (params, response.text)

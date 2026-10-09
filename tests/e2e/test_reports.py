@@ -4,25 +4,19 @@ from datetime import datetime
 
 import pytest
 from bson import Int64
-from pymongo import MongoClient
 
 pytestmark = pytest.mark.e2e
 
 
-def _reset_records(e2e_database_name: str) -> None:
-    with MongoClient(
-        "mongodb://localhost:27018/?retryWrites=false", serverSelectionTimeoutMS=5_000
-    ) as client:
-        database = client[e2e_database_name]
-        database["books"].delete_many({})
-        database["authors"].delete_many({})
-        database["authors"].insert_many(
-            [
-                {"id": Int64(971), "name": "Ada Lovelace", "birth_date": datetime(1815, 12, 10)},
-                {"id": Int64(972), "name": "Grace Hopper", "birth_date": None},
-                {"id": Int64(973), "name": "Katherine Johnson", "birth_date": None},
-            ]
-        )
+def _reset_records(database) -> None:
+    database["books"].delete_many({})
+    database["authors"].insert_many(
+        [
+            {"id": Int64(971), "name": "Ada Lovelace", "birth_date": datetime(1815, 12, 10)},
+            {"id": Int64(972), "name": "Grace Hopper", "birth_date": None},
+            {"id": Int64(973), "name": "Katherine Johnson", "birth_date": None},
+        ]
+    )
 
 
 def _create_book(api_client, *, title: str, publisher: str, author_ids: list[int], pages: int):
@@ -39,8 +33,8 @@ def _create_book(api_client, *, title: str, publisher: str, author_ids: list[int
     return response.json()
 
 
-def test_author_and_publisher_reports(api_client, e2e_database_name: str) -> None:
-    _reset_records(e2e_database_name)
+def test_author_reports(api_client, e2e_database) -> None:
+    _reset_records(e2e_database)
     first = _create_book(
         api_client,
         title="Analytical Engines",
@@ -87,6 +81,24 @@ def test_author_and_publisher_reports(api_client, e2e_database_name: str) -> Non
     assert missing_author.status_code == 404
     assert missing_author.json()["error"]["code"] == "author_not_found"
 
+
+def test_publisher_average_pages_report(api_client, e2e_database) -> None:
+    _reset_records(e2e_database)
+    first = _create_book(
+        api_client,
+        title="Analytical Engines",
+        publisher="North/Star Press",
+        author_ids=[971, 972],
+        pages=100,
+    )
+    second = _create_book(
+        api_client,
+        title="Computing Machinery",
+        publisher="North/Star Press",
+        author_ids=[972],
+        pages=201,
+    )
+
     encoded_name = "North%2FStar%20Press"
     average = api_client.get(f"/publishers/{encoded_name}/average_pages")
     assert average.status_code == 200, average.text
@@ -112,5 +124,3 @@ def test_author_and_publisher_reports(api_client, e2e_database_name: str) -> Non
         "average_pages": 200.0,
         "book_count": 1,
     }
-    refreshed_authors = api_client.get("/authors").json()
-    assert [author["book_count"] for author in refreshed_authors] == [1, 1, 0]

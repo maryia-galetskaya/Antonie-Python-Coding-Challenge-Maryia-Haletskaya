@@ -4,12 +4,12 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pymongo.errors import ConnectionFailure
 
-from antonie_books.application.errors import DatabaseUnavailableError
-from antonie_books.application.service_errors import (
+from antonie_books.application.errors import (
     AuthorNotFoundError,
     BookNotFoundError,
+    DatabaseUnavailableError,
+    DataIntegrityError,
     PublisherNotFoundError,
 )
 from antonie_books.domain.errors import DomainError
@@ -78,23 +78,6 @@ async def database_unavailable_handler(
     )
 
 
-async def mongo_connection_error_handler(request: Request, exc: ConnectionFailure) -> JSONResponse:
-    """Map PyMongo network and server-selection failures to the safe 503 contract."""
-
-    del request
-    logger.warning("MongoDB connection failed while handling request: %s", exc)
-    return JSONResponse(
-        status_code=503,
-        content={
-            "error": {
-                "code": "database_unavailable",
-                "message": "The database is temporarily unavailable.",
-            }
-        },
-        headers={"Retry-After": "1"},
-    )
-
-
 async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Log unexpected failures and return no internal exception details to clients."""
 
@@ -118,14 +101,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AuthorNotFoundError, author_not_found_handler)
     app.add_exception_handler(PublisherNotFoundError, publisher_not_found_handler)
     app.add_exception_handler(DatabaseUnavailableError, database_unavailable_handler)
-    app.add_exception_handler(ConnectionFailure, mongo_connection_error_handler)
+    app.add_exception_handler(DataIntegrityError, unexpected_error_handler)
     app.add_exception_handler(Exception, unexpected_error_handler)
-
-
-__all__ = [
-    "database_unavailable_handler",
-    "domain_error_handler",
-    "mongo_connection_error_handler",
-    "register_exception_handlers",
-    "unexpected_error_handler",
-]
