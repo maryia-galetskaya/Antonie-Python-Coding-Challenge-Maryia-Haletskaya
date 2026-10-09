@@ -1,13 +1,13 @@
 """Explicit, repeatable initialization of the API's demonstration data."""
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from bson import Int64
 from pymongo import AsyncMongoClient
 
-from antonie_books.api.config import Settings
+from antonie_books.config import Settings
 from antonie_books.infrastructure.mongo import MongoDatabase
 
 _AUTHORS = (
@@ -34,8 +34,7 @@ async def seed_database(database: Any) -> None:
     # counter backwards when the seed is rerun against a used database.
     await counters.update_one({"_id": "books"}, {"$max": {"seq": Int64(2)}}, upsert=True)
 
-    current_time = datetime.now(UTC)
-    now = current_time.replace(microsecond=(current_time.microsecond // 1000) * 1000)
+    sample_time = datetime(2017, 1, 12, tzinfo=timezone(timedelta(hours=3))).astimezone(UTC)
     demo_books = (
         {
             "id": Int64(1),
@@ -44,18 +43,18 @@ async def seed_database(database: Any) -> None:
             "author_ids": [Int64(1)],
             "pages": Int64(1648),
             "tags": ["Python", "Development", "Learning"],
-            "created_at": now,
-            "updated_at": now,
+            "created_at": sample_time,
+            "updated_at": sample_time,
         },
         {
             "id": Int64(2),
             "title": "Architecture Patterns with Python",
             "publisher": "O'Reilly Media",
             "author_ids": [Int64(2), Int64(3)],
-            "pages": Int64(238),
-            "tags": ["Python", "Architecture", "Development"],
-            "created_at": now,
-            "updated_at": now,
+            "pages": Int64(304),
+            "tags": ["Python", "Development", "Functional Programming"],
+            "created_at": sample_time,
+            "updated_at": sample_time,
         },
     )
     for book in demo_books:
@@ -64,7 +63,14 @@ async def seed_database(database: Any) -> None:
 
 async def _run_seed() -> None:
     settings = Settings()
-    client = AsyncMongoClient(settings.mongo_uri, tz_aware=True, retryWrites=False)
+    client = AsyncMongoClient(
+        settings.mongo_uri,
+        tz_aware=True,
+        retryWrites=False,
+        timeoutMS=5_000,
+        serverSelectionTimeoutMS=5_000,
+        connectTimeoutMS=5_000,
+    )
     try:
         await client.admin.command("ping")
         await seed_database(client[settings.mongo_database])

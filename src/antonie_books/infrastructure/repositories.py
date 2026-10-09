@@ -1,14 +1,20 @@
 """MongoDB implementations of the application repository ports."""
 
+from datetime import datetime
 import re
+from functools import wraps
 from typing import Any
 
 from bson import Int64
 from pymongo import ASCENDING, ReturnDocument
+from pymongo.errors import (
+    ConnectionFailure,
+    NetworkTimeout,
+    PyMongoError,
+    ServerSelectionTimeoutError,
+)
 
-from antonie_books.application.commands import UpdateBookCommand
-from antonie_books.application.filters import BookFilter, PageRequest
-from antonie_books.application.results import AuthorResult, PageResult
+from antonie_books.application.errors import DatabaseUnavailableError, DataIntegrityError
 from antonie_books.domain.models import Author, Book
 from antonie_books.infrastructure.mappers import (
     author_from_document,
@@ -17,6 +23,25 @@ from antonie_books.infrastructure.mappers import (
     book_to_document,
 )
 
+MAX_INT64 = 2**63 - 1
+
+
+def _storage_boundary(method):
+    """Translate driver connectivity and timeouts at the adapter edge."""
+
+    @wraps(method)
+    async def wrapped(*args, **kwargs):
+        try:
+            return await method(*args, **kwargs)
+        except (ConnectionFailure, NetworkTimeout, ServerSelectionTimeoutError) as exc:
+            raise DatabaseUnavailableError("MongoDB is unavailable") from exc
+        except PyMongoError as exc:
+            if exc.timeout:
+                raise DatabaseUnavailableError("MongoDB operation timed out") from exc
+            raise
+
+    return wrapped
+
 
 class MongoBookIdGenerator:
     """Allocate persistent sequential public IDs from the pre-initialized counter."""
@@ -24,15 +49,38 @@ class MongoBookIdGenerator:
     def __init__(self, counters: Any) -> None:
         self._counters = counters
 
+    @_storage_boundary
     async def next_id(self) -> int:
         document = await self._counters.find_one_and_update(
-            {"_id": "books"},
+            {
+                "_id": "books",
+                "seq": {"$type": ["int", "long"], "$gte": Int64(0), "$lt": Int64(MAX_INT64)},
+            },
             {"$inc": {"seq": Int64(1)}},
             return_document=ReturnDocument.AFTER,
         )
         if document is None:
-            raise RuntimeError("The books ID counter is missing; restart after restoring it")
-        return int(document["seq"])
+            current = await self._counters.find_one({"_id": "books"})
+            if current is None:
+                raise DataIntegrityError("The books ID counter is missing")
+            sequence = current.get("seq")
+            if (
+                isinstance(sequence, bool)
+                or not isinstance(sequence, int)
+                or not 0 <= sequence <= MAX_INT64
+            ):
+                raise DataIntegrityError("The books ID counter contains an invalid sequence value")
+            if sequence == MAX_INT64:
+                raise DataIntegrityError("The books ID counter is exhausted")
+            raise DataIntegrityError("The books ID counter could not allocate an ID")
+        sequence = document.get("seq")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or not 1 <= sequence <= MAX_INT64
+        ):
+            raise DataIntegrityError("The books ID counter contains an invalid sequence value")
+        return sequence
 
 
 class MongoBookRepository:
@@ -42,36 +90,62 @@ class MongoBookRepository:
         self._books = books
         self._authors = authors
 
+    @staticmethod
+    def _books_from_documents(documents: list[dict[str, Any]]) -> tuple[Book, ...]:
+        return tuple(book_from_document(document) for document in documents)
+
+    @_storage_boundary
     async def add(self, book: Book) -> None:
         await self._books.insert_one(book_to_document(book))
 
+    @_storage_boundary
     async def get_by_id(self, book_id: int) -> Book | None:
         document = await self._books.find_one({"id": Int64(book_id)})
         return book_from_document(document) if document is not None else None
 
-    async def list(self, filters: BookFilter) -> PageResult[Book]:
-        query = await self._filter_query(filters)
+    @_storage_boundary
+    async def list(
+        self,
+        *,
+        author: str | None,
+        title: str | None,
+        tags: tuple[str, ...],
+        page: int,
+        limit: int,
+    ) -> tuple[tuple[Book, ...], int]:
+        query = await self._filter_query(author=author, title=title, tags=tags)
         total = await self._books.count_documents(query)
+        if (page - 1) * limit >= total:
+            return (), total
         cursor = (
             self._books.find(query)
             .sort("id", ASCENDING)
-            .skip((filters.page.page - 1) * filters.page.limit)
-            .limit(filters.page.limit)
+            .skip((page - 1) * limit)
+            .limit(limit)
         )
-        docs = await cursor.to_list(length=filters.page.limit)
-        return PageResult(
-            tuple(book_from_document(document) for document in docs),
-            filters.page.page,
-            filters.page.limit,
-            total,
-        )
+        docs = await cursor.to_list(length=limit)
+        return self._books_from_documents(docs), total
 
+    @_storage_boundary
     async def update(
-        self, book_id: int, changes: UpdateBookCommand, updated_at: Any
+        self,
+        book_id: int,
+        *,
+        updated_at: datetime,
+        title: str | None = None,
+        publisher: str | None = None,
+        author_ids: tuple[int, ...] | None = None,
+        pages: int | None = None,
+        tags: tuple[str, ...] | None = None,
     ) -> Book | None:
         values: dict[str, Any] = {}
-        for field in ("title", "publisher", "pages", "tags", "author_ids"):
-            value = getattr(changes, field)
+        for field, value in (
+            ("title", title),
+            ("publisher", publisher),
+            ("pages", pages),
+            ("tags", tags),
+            ("author_ids", author_ids),
+        ):
             if value is None:
                 continue
             if field == "author_ids":
@@ -80,47 +154,38 @@ class MongoBookRepository:
                 value = Int64(value)
             elif field == "tags":
                 value = list(value)
-            # Pipeline updates treat strings beginning with "$" as field references. Literal
-            # wrappers preserve client-supplied values as data while still allowing the
-            # timestamp expression below to advance monotonically.
-            values[field] = {"$literal": value}
-        values["updated_at"] = {
-            "$max": [
-                updated_at,
-                {
-                    "$dateAdd": {
-                        "startDate": "$updated_at",
-                        "unit": "millisecond",
-                        "amount": 1,
-                    }
-                },
-            ]
-        }
+            values[field] = value
+        update = {"$set": values, "$max": {"updated_at": updated_at}}
         document = await self._books.find_one_and_update(
             {"id": Int64(book_id)},
-            [{"$set": values}],
+            update,
             return_document=ReturnDocument.AFTER,
         )
         return book_from_document(document) if document is not None else None
 
+    @_storage_boundary
     async def delete(self, book_id: int) -> bool:
         result = await self._books.delete_one({"id": Int64(book_id)})
         return result.deleted_count == 1
 
-    async def list_for_author(self, author_id: int, page: PageRequest) -> PageResult[Book]:
+    @_storage_boundary
+    async def list_for_author(
+        self, author_id: int, *, page: int, limit: int
+    ) -> tuple[tuple[Book, ...], int]:
         query = {"author_ids": Int64(author_id)}
         total = await self._books.count_documents(query)
+        if (page - 1) * limit >= total:
+            return (), total
         cursor = (
             self._books.find(query)
             .sort("id", ASCENDING)
-            .skip((page.page - 1) * page.limit)
-            .limit(page.limit)
+            .skip((page - 1) * limit)
+            .limit(limit)
         )
-        docs = await cursor.to_list(length=page.limit)
-        return PageResult(
-            tuple(book_from_document(doc) for doc in docs), page.page, page.limit, total
-        )
+        docs = await cursor.to_list(length=limit)
+        return self._books_from_documents(docs), total
 
+    @_storage_boundary
     async def author_book_counts(self) -> dict[int, int]:
         pipeline = [
             {"$unwind": "$author_ids"},
@@ -128,8 +193,13 @@ class MongoBookRepository:
         ]
         cursor = await self._books.aggregate(pipeline)
         rows = await cursor.to_list(length=None)
-        return {int(row["_id"]): int(row["count"]) for row in rows}
+        counts: dict[int, int] = {}
+        for row in rows:
+            author_id, count = row["_id"], row["count"]
+            counts[author_id] = count
+        return counts
 
+    @_storage_boundary
     async def publisher_average_pages(self, publisher: str) -> tuple[float, int] | None:
         pipeline = [
             {"$match": {"publisher": publisher}},
@@ -147,16 +217,19 @@ class MongoBookRepository:
             return None
         return float(rows[0]["average_pages"]), int(rows[0]["book_count"])
 
-    async def _filter_query(self, filters: BookFilter) -> dict[str, Any]:
+    @_storage_boundary
+    async def _filter_query(
+        self, *, author: str | None, title: str | None, tags: tuple[str, ...]
+    ) -> dict[str, Any]:
         clauses: list[dict[str, Any]] = []
-        if filters.title is not None:
-            clauses.append({"title": {"$regex": re.escape(filters.title), "$options": "i"}})
-        if filters.author is not None:
-            author_pattern = {"$regex": re.escape(filters.author), "$options": "i"}
+        if title is not None:
+            clauses.append({"title": {"$regex": re.escape(title), "$options": "i"}})
+        if author is not None:
+            author_pattern = {"$regex": re.escape(author), "$options": "i"}
             ids = await self._authors.distinct("id", {"name": author_pattern})
             clauses.append({"author_ids": {"$in": ids}})
-        if filters.tags:
-            clauses.append({"tags": {"$all": list(filters.tags)}})
+        if tags:
+            clauses.append({"tags": {"$all": list(tags)}})
         if not clauses:
             return {}
         return {"$and": clauses}
@@ -165,56 +238,29 @@ class MongoBookRepository:
 class MongoAuthorRepository:
     """Author lookups, batched reads, and book count projections."""
 
-    def __init__(self, authors: Any, books: Any) -> None:
+    def __init__(self, authors: Any) -> None:
         self._authors = authors
-        self._books = books
 
+    @_storage_boundary
     async def get_by_id(self, author_id: int) -> Author | None:
         document = await self._authors.find_one({"id": Int64(author_id)})
         return author_from_document(document) if document is not None else None
 
+    @_storage_boundary
     async def get_many(self, author_ids: tuple[int, ...]) -> tuple[Author, ...]:
         if not author_ids:
             return ()
         documents = await self._authors.find(
             {"id": {"$in": [Int64(i) for i in author_ids]}}
         ).to_list(length=len(author_ids))
-        by_id = {int(document["id"]): author_from_document(document) for document in documents}
+        by_id = {document["id"]: author_from_document(document) for document in documents}
         return tuple(by_id[author_id] for author_id in author_ids if author_id in by_id)
 
+    @_storage_boundary
     async def list(self) -> tuple[Author, ...]:
         documents = await self._authors.find({}).sort("id", ASCENDING).to_list(length=None)
         return tuple(author_from_document(document) for document in documents)
 
-    async def list_with_book_counts(self) -> tuple[AuthorResult, ...]:
-        pipeline = [
-            {
-                "$lookup": {
-                    "from": "books",
-                    "let": {"author_id": "$id"},
-                    "pipeline": [
-                        {"$match": {"$expr": {"$in": ["$$author_id", "$author_ids"]}}},
-                        {"$count": "count"},
-                    ],
-                    "as": "book_count_rows",
-                }
-            },
-            {
-                "$project": {
-                    "id": 1,
-                    "name": 1,
-                    "birth_date": 1,
-                    "book_count": {"$ifNull": [{"$arrayElemAt": ["$book_count_rows.count", 0]}, 0]},
-                }
-            },
-            {"$sort": {"id": ASCENDING}},
-        ]
-        cursor = await self._authors.aggregate(pipeline)
-        documents = await cursor.to_list(length=None)
-        return tuple(
-            AuthorResult(author_from_document(document), int(document["book_count"]))
-            for document in documents
-        )
-
+    @_storage_boundary
     async def add(self, author: Author) -> None:
         await self._authors.insert_one(author_to_document(author))

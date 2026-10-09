@@ -24,6 +24,15 @@ build/
 dist/
 *.egg-info/
 
+# Terraform local state and generated files
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/tfplan
+terraform/terraform.tfvars
+terraform/terraform.tfvars.json
+
 # Editors and operating systems
 .idea/
 .vscode/
