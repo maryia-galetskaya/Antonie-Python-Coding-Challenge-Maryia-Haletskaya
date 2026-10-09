@@ -22,7 +22,7 @@ def author_from_document(document: dict[str, Any]) -> Author:
     birth_date = document.get("birth_date")
     if isinstance(birth_date, datetime):
         birth_date = birth_date.date()
-    return Author(id=document["id"], name=document["name"], birth_date=birth_date)
+    return Author(id=document["id"], name=document["name"].strip(), birth_date=birth_date)
 
 
 def book_to_document(book: Book) -> dict[str, Any]:

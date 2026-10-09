@@ -10,6 +10,7 @@ from antonie_books.api.schemas import (
     BookPageResponse,
     BookPatchRequest,
     BookResponse,
+    NonEmptyFilter,
 )
 from antonie_books.application.dto import (
     BookIdInput,
@@ -73,9 +74,9 @@ async def create_book(
 @router.get("", response_model=BookPageResponse)
 async def list_books(
     service: Annotated[BookService, Depends(get_book_service)],
-    author: Annotated[str | None, Query()] = None,
-    title: Annotated[str | None, Query()] = None,
-    tags: Annotated[list[str] | None, Query()] = None,
+    author: Annotated[NonEmptyFilter | None, Query()] = None,
+    title: Annotated[NonEmptyFilter | None, Query()] = None,
+    tags: Annotated[list[NonEmptyFilter] | None, Query()] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> BookPageResponse:
