@@ -2,16 +2,21 @@
 
 from datetime import UTC, datetime
 
-from antonie_books.application.commands import CreateBookCommand, UpdateBookCommand
-from antonie_books.application.filters import BookFilter, PageRequest
-from antonie_books.application.ports import AuthorRepository, BookIdGenerator, BookRepository, Clock
-from antonie_books.application.results import (
-    AuthorResult,
-    BookResult,
-    PageResult,
-    PublisherAverageResult,
+from antonie_books.application.dto import (
+    AuthorIdInput,
+    AuthorOutput,
+    AuthorWithBookCountOutput,
+    BookIdInput,
+    BookOutput,
+    BookPageOutput,
+    CreateBookInput,
+    ListAuthorBooksInput,
+    ListBooksInput,
+    PublisherAverageOutput,
+    PublisherInput,
+    UpdateBookInput,
 )
-from antonie_books.application.service_errors import (
+from antonie_books.application.errors import (
     AuthorNotFoundError,
     BookNotFoundError,
     UnknownBookAuthorError,
@@ -19,164 +24,196 @@ from antonie_books.application.service_errors import (
 from antonie_books.domain.models import Author, Book
 
 
-def _utc_millisecond_time(clock: Clock) -> datetime:
-    """Read an aware clock value and normalize it to UTC millisecond precision."""
-
-    value = clock.now()
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("clock must return a timezone-aware datetime")
-    normalized = value.astimezone(UTC)
-    return normalized.replace(microsecond=(normalized.microsecond // 1000) * 1000)
-
-
 class BookService:
     """Coordinate book CRUD while keeping persistence and time replaceable."""
 
     def __init__(
         self,
-        books: BookRepository,
-        authors: AuthorRepository,
-        id_generator: BookIdGenerator,
-        clock: Clock,
+        book_repository,
+        author_repository,
+        book_id_generator,
+        clock,
     ) -> None:
-        self._books = books
-        self._authors = authors
-        self._id_generator = id_generator
+        self._book_repository = book_repository
+        self._author_repository = author_repository
+        self._book_id_generator = book_id_generator
         self._clock = clock
 
-    async def create(self, command: CreateBookCommand) -> BookResult:
+    def _utc_millisecond_time(self) -> datetime:
+        """Read an aware clock value and normalize it to UTC millisecond precision."""
+
+        value = self._clock.now()
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("clock must return a timezone-aware datetime")
+        normalized = value.astimezone(UTC)
+        return normalized.replace(microsecond=(normalized.microsecond // 1000) * 1000)
+
+    @staticmethod
+    def _book_output(book: Book, authors: tuple[Author, ...]) -> BookOutput:
+        authors_by_id = {author.id: author for author in authors}
+        return BookOutput(
+            id=book.id,
+            title=book.title,
+            publisher=book.publisher,
+            author_ids=book.author_ids,
+            authors=tuple(
+                AuthorOutput(author.id, author.name, author.birth_date)
+                for author_id in book.author_ids
+                if (author := authors_by_id.get(author_id)) is not None
+            ),
+            pages=book.pages,
+            tags=book.tags,
+            created_at=book.created_at,
+            updated_at=book.updated_at,
+        )
+
+    @classmethod
+    def _book_outputs(
+        cls, books: tuple[Book, ...], authors: tuple[Author, ...]
+    ) -> tuple[BookOutput, ...]:
+        authors_by_id = {author.id: author for author in authors}
+        return tuple(
+            cls._book_output(
+                book,
+                tuple(authors_by_id[i] for i in book.author_ids if i in authors_by_id),
+            )
+            for book in books
+        )
+
+    async def create(self, data: CreateBookInput) -> BookOutput:
         """Validate references, allocate an ID, and persist a new book.
 
         The ID is intentionally allocated only after reference validation. Once allocated, it is
         never rolled back if construction or repository insertion fails.
         """
 
-        authors = await self._require_authors(command.author_ids, for_write=True)
-        now = _utc_millisecond_time(self._clock)
-        book_id = await self._id_generator.next_id()
+        authors = await self._require_authors(data.author_ids)
+        now = self._utc_millisecond_time()
+        book_id = await self._book_id_generator.next_id()
         book = Book(
             id=book_id,
-            title=command.title,
-            publisher=command.publisher,
-            author_ids=command.author_ids,
-            pages=command.pages,
-            tags=command.tags,
+            title=data.title,
+            publisher=data.publisher,
+            author_ids=data.author_ids,
+            pages=data.pages,
+            tags=data.tags,
             created_at=now,
             updated_at=now,
         )
-        await self._books.add(book)
-        return BookResult(book=book, authors=authors)
+        await self._book_repository.add(book)
+        return self._book_output(book, authors)
 
-    async def get(self, book_id: int) -> BookResult:
+    async def get(self, data: BookIdInput) -> BookOutput:
         """Return a book with its authors or raise ``BookNotFoundError``."""
 
-        book = await self._books.get_by_id(book_id)
+        book = await self._book_repository.get_by_id(data.book_id)
         if book is None:
-            raise BookNotFoundError(book_id)
-        return BookResult(book=book, authors=await self._require_authors(book.author_ids))
+            raise BookNotFoundError(data.book_id)
+        authors = await self._author_repository.get_many(book.author_ids)
+        return self._book_output(book, authors)
 
-    async def list(self, filters: BookFilter | None = None) -> PageResult[BookResult]:
+    async def list(self, data: ListBooksInput) -> BookPageOutput:
         """Return a page of books with author entities resolved in repository order."""
 
-        page = await self._books.list(filters or BookFilter())
-        all_author_ids = tuple(
-            dict.fromkeys(author_id for book in page.items for author_id in book.author_ids)
+        books, total = await self._book_repository.list(
+            author=data.author, title=data.title, tags=data.tags, page=data.page, limit=data.limit
         )
-        authors = await self._authors.get_many(all_author_ids) if all_author_ids else ()
-        authors_by_id = {author.id: author for author in authors}
-        missing = tuple(author_id for author_id in all_author_ids if author_id not in authors_by_id)
-        if missing:
-            raise AuthorNotFoundError(missing)
-        items = [
-            BookResult(
-                book=book,
-                authors=tuple(authors_by_id[author_id] for author_id in book.author_ids),
-            )
-            for book in page.items
-        ]
-        return PageResult(items=tuple(items), page=page.page, limit=page.limit, total=page.total)
+        all_author_ids = tuple(dict.fromkeys(i for book in books for i in book.author_ids))
+        authors = (
+            await self._author_repository.get_many(all_author_ids) if all_author_ids else ()
+        )
+        return BookPageOutput(self._book_outputs(books, authors), data.page, data.limit, total)
 
-    async def update(self, book_id: int, changes: UpdateBookCommand) -> BookResult:
+    async def update(self, data: UpdateBookInput) -> BookOutput:
         """Apply only supplied fields and retain the repository's current book state."""
 
-        if changes.author_ids is not None:
-            await self._require_authors(changes.author_ids, for_write=True)
-        updated_at = _utc_millisecond_time(self._clock)
-        book = await self._books.update(book_id, changes, updated_at)
+        if data.author_ids is not None:
+            await self._require_authors(data.author_ids)
+        updated_at = self._utc_millisecond_time()
+        book = await self._book_repository.update(
+            data.book_id,
+            updated_at=updated_at,
+            title=data.title,
+            publisher=data.publisher,
+            author_ids=data.author_ids,
+            pages=data.pages,
+            tags=data.tags,
+        )
         if book is None:
-            raise BookNotFoundError(book_id)
-        return BookResult(book=book, authors=await self._require_authors(book.author_ids))
+            raise BookNotFoundError(data.book_id)
+        authors = await self._author_repository.get_many(book.author_ids)
+        return self._book_output(book, authors)
 
-    async def delete(self, book_id: int) -> None:
+    async def delete(self, data: BookIdInput) -> None:
         """Delete an existing book, raising when it is unknown."""
 
-        if not await self._books.delete(book_id):
-            raise BookNotFoundError(book_id)
+        if not await self._book_repository.delete(data.book_id):
+            raise BookNotFoundError(data.book_id)
 
-    async def _require_authors(
-        self, author_ids: tuple[int, ...], *, for_write: bool = False
-    ) -> tuple[Author, ...]:
-        authors = await self._authors.get_many(author_ids)
+    async def _require_authors(self, author_ids: tuple[int, ...]) -> tuple[Author, ...]:
+        authors = await self._author_repository.get_many(author_ids)
         found_ids = {author.id for author in authors}
         missing = tuple(author_id for author_id in author_ids if author_id not in found_ids)
         if missing:
-            if for_write:
-                raise UnknownBookAuthorError(missing)
-            raise AuthorNotFoundError(missing)
+            raise UnknownBookAuthorError(missing)
         return authors
 
 
 class AuthorService:
     """Read author resources and their book counts."""
 
-    def __init__(self, authors: AuthorRepository, books: BookRepository) -> None:
-        self._authors = authors
-        self._books = books
+    def __init__(self, author_repository, book_repository) -> None:
+        self._author_repository = author_repository
+        self._book_repository = book_repository
 
-    async def get(self, author_id: int) -> Author:
-        author = await self._authors.get_by_id(author_id)
+    async def get(self, data: AuthorIdInput) -> AuthorOutput:
+        author = await self._author_repository.get_by_id(data.author_id)
         if author is None:
-            raise AuthorNotFoundError((author_id,))
-        return author
+            raise AuthorNotFoundError((data.author_id,))
+        return AuthorOutput(author.id, author.name, author.birth_date)
 
-    async def list(self) -> tuple[Author, ...]:
-        return await self._authors.list()
+    async def list(self) -> tuple[AuthorOutput, ...]:
+        return tuple(
+            AuthorOutput(author.id, author.name, author.birth_date)
+            for author in await self._author_repository.list()
+        )
 
-    async def list_with_book_counts(self) -> tuple[AuthorResult, ...]:
-        return await self._authors.list_with_book_counts()
+    async def list_with_book_counts(self) -> tuple[AuthorWithBookCountOutput, ...]:
+        authors = await self._author_repository.list()
+        counts = await self._book_repository.author_book_counts()
+        return tuple(
+            AuthorWithBookCountOutput(
+                AuthorOutput(author.id, author.name, author.birth_date),
+                counts.get(author.id, 0),
+            )
+            for author in authors
+        )
 
-    async def list_books(
-        self, author_id: int, page: PageRequest | None = None
-    ) -> PageResult[BookResult]:
+    async def list_books(self, data: ListAuthorBooksInput) -> BookPageOutput:
         """List an author's books with batched author details, even when the page is empty."""
 
-        await self.get(author_id)
-        books = await self._books.list_for_author(author_id, page or PageRequest())
-        author_ids = tuple(dict.fromkeys(i for book in books.items for i in book.author_ids))
-        authors = await self._authors.get_many(author_ids) if author_ids else ()
-        authors_by_id = {author.id: author for author in authors}
-        missing = tuple(i for i in author_ids if i not in authors_by_id)
-        if missing:
-            raise AuthorNotFoundError(missing)
-        items = tuple(
-            BookResult(book, tuple(authors_by_id[i] for i in book.author_ids))
-            for book in books.items
+        await self.get(AuthorIdInput(data.author_id))
+        books, total = await self._book_repository.list_for_author(
+            data.author_id, page=data.page, limit=data.limit
         )
-        return PageResult(items, books.page, books.limit, books.total)
+        author_ids = tuple(dict.fromkeys(i for book in books for i in book.author_ids))
+        authors = (
+            await self._author_repository.get_many(author_ids) if author_ids else ()
+        )
+        return BookPageOutput(
+            BookService._book_outputs(books, authors), data.page, data.limit, total
+        )
 
 
 class PublisherService:
     """Expose publisher page-count aggregates backed by the book repository."""
 
-    def __init__(self, books: BookRepository) -> None:
-        self._books = books
+    def __init__(self, book_repository) -> None:
+        self._book_repository = book_repository
 
-    async def get_average(self, publisher: str) -> PublisherAverageResult | None:
-        aggregate = await self._books.publisher_average_pages(publisher)
+    async def get_average(self, data: PublisherInput) -> PublisherAverageOutput | None:
+        aggregate = await self._book_repository.publisher_average_pages(data.publisher)
         if aggregate is None:
             return None
         average_pages, book_count = aggregate
-        return PublisherAverageResult(publisher, average_pages, book_count)
-
-
-__all__ = ["AuthorService", "BookService", "PublisherService"]
+        return PublisherAverageOutput(data.publisher, average_pages, book_count)

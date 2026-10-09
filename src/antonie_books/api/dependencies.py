@@ -1,42 +1,30 @@
-"""Manual dependency lookup used by API routers."""
+"""Typed FastAPI dependencies for the application service container."""
 
-from collections.abc import Mapping
-from typing import Any
+from dataclasses import dataclass
 
 from fastapi import Request
 
+from antonie_books.application.services import AuthorService, BookService, PublisherService
 
-def get_container(request: Request) -> object:
-    """Return the application dependency container configured by ``create_app``."""
 
+@dataclass(slots=True)
+class Services:
+    book_service: BookService
+    author_service: AuthorService
+    publisher_service: PublisherService
+
+
+def get_container(request: Request) -> Services:
     return request.app.state.container
 
 
-def service_dependency(service_name: str):
-    """Build a FastAPI dependency that reads a named service from the container."""
-
-    def get_service(request: Request) -> Any:
-        container = get_container(request)
-        if isinstance(container, Mapping):
-            service = container.get(service_name)
-        else:
-            service = getattr(container, service_name, None)
-        if service is None:
-            raise RuntimeError(f"Application service {service_name!r} is not configured")
-        return service
-
-    get_service.__name__ = f"get_{service_name}"
-    return get_service
+def get_book_service(request: Request) -> BookService:
+    return get_container(request).book_service
 
 
-get_book_service = service_dependency("book_service")
-get_author_service = service_dependency("author_service")
-get_publisher_service = service_dependency("publisher_service")
+def get_author_service(request: Request) -> AuthorService:
+    return get_container(request).author_service
 
-__all__ = [
-    "get_author_service",
-    "get_book_service",
-    "get_container",
-    "get_publisher_service",
-    "service_dependency",
-]
+
+def get_publisher_service(request: Request) -> PublisherService:
+    return get_container(request).publisher_service

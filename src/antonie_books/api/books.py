@@ -11,17 +11,21 @@ from antonie_books.api.schemas import (
     BookPatchRequest,
     BookResponse,
 )
-from antonie_books.application.commands import CreateBookCommand, UpdateBookCommand
-from antonie_books.application.filters import BookFilter, PageRequest
-from antonie_books.application.results import BookResult, PageResult
+from antonie_books.application.dto import (
+    BookIdInput,
+    BookOutput,
+    BookPageOutput,
+    CreateBookInput,
+    ListBooksInput,
+    UpdateBookInput,
+)
 from antonie_books.application.services import BookService
 
 router = APIRouter(prefix="/books", tags=["books"])
 BookId = Annotated[int, Path(gt=0, le=2**63 - 1)]
 
 
-def _response(result: BookResult) -> BookResponse:
-    book = result.book
+def _response(book: BookOutput) -> BookResponse:
     return BookResponse(
         id=book.id,
         title=book.title,
@@ -29,7 +33,7 @@ def _response(result: BookResult) -> BookResponse:
         author_ids=list(book.author_ids),
         authors=[
             {"id": author.id, "name": author.name, "birth_date": author.birth_date}
-            for author in result.authors
+            for author in book.authors
         ],
         pages=book.pages,
         tags=list(book.tags),
@@ -38,7 +42,7 @@ def _response(result: BookResult) -> BookResponse:
     )
 
 
-def _page_response(result: PageResult[BookResult]) -> BookPageResponse:
+def _page_response(result: BookPageOutput) -> BookPageResponse:
     return BookPageResponse(
         items=[_response(item) for item in result.items],
         page=result.page,
@@ -54,7 +58,7 @@ async def create_book(
     service: Annotated[BookService, Depends(get_book_service)],
 ) -> BookResponse:
     result = await service.create(
-        CreateBookCommand(
+        CreateBookInput(
             title=payload.title,
             publisher=payload.publisher,
             author_ids=tuple(payload.author_ids),
@@ -62,7 +66,7 @@ async def create_book(
             tags=tuple(payload.tags),
         )
     )
-    response.headers["Location"] = f"/books/{result.book.id}"
+    response.headers["Location"] = f"/books/{result.id}"
     return _response(result)
 
 
@@ -75,23 +79,23 @@ async def list_books(
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> BookPageResponse:
-    return _page_response(
-        await service.list(
-            BookFilter(
-                author=author,
-                title=title,
-                tags=tuple(tags or ()),
-                page=PageRequest(page, limit),
-            )
+    result = await service.list(
+        ListBooksInput(
+            author=author,
+            title=title,
+            tags=tuple(tags or ()),
+            page=page,
+            limit=limit,
         )
     )
+    return _page_response(result)
 
 
 @router.get("/{book_id}", response_model=BookResponse)
 async def get_book(
     book_id: BookId, service: Annotated[BookService, Depends(get_book_service)]
 ) -> BookResponse:
-    return _response(await service.get(book_id))
+    return _response(await service.get(BookIdInput(book_id)))
 
 
 @router.patch("/{book_id}", response_model=BookResponse)
@@ -105,7 +109,7 @@ async def update_book(
         changes["author_ids"] = tuple(changes["author_ids"])
     if "tags" in changes:
         changes["tags"] = tuple(changes["tags"])
-    return _response(await service.update(book_id, UpdateBookCommand(**changes)))
+    return _response(await service.update(UpdateBookInput(book_id=book_id, **changes)))
 
 
 @router.delete("/{book_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -113,8 +117,5 @@ async def delete_book(
     book_id: BookId,
     service: Annotated[BookService, Depends(get_book_service)],
 ) -> Response:
-    await service.delete(book_id)
+    await service.delete(BookIdInput(book_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-__all__ = ["router"]

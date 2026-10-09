@@ -11,8 +11,8 @@ from antonie_books.api.schemas import (
     BookPageResponse,
     PublisherAverageResponse,
 )
-from antonie_books.application.filters import PageRequest
-from antonie_books.application.service_errors import PublisherNotFoundError
+from antonie_books.application.dto import ListAuthorBooksInput, PublisherInput
+from antonie_books.application.errors import PublisherNotFoundError
 from antonie_books.application.services import AuthorService, PublisherService
 
 authors_router = APIRouter(prefix="/authors", tags=["authors"])
@@ -42,7 +42,7 @@ async def list_author_books(
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> BookPageResponse:
-    result = await service.list_books(author_id, PageRequest(page, limit))
+    result = await service.list_books(ListAuthorBooksInput(author_id, page, limit))
     return _page_response(result)
 
 
@@ -53,7 +53,7 @@ async def publisher_average_pages(
     publisher_name: Annotated[str, Path(min_length=1)],
     service: Annotated[PublisherService, Depends(get_publisher_service)],
 ) -> PublisherAverageResponse:
-    result = await service.get_average(publisher_name)
+    result = await service.get_average(PublisherInput(publisher_name))
     if result is None:
         raise PublisherNotFoundError(publisher_name)
     return PublisherAverageResponse(
@@ -61,6 +61,3 @@ async def publisher_average_pages(
         average_pages=result.average_pages,
         book_count=result.book_count,
     )
-
-
-__all__ = ["authors_router", "publishers_router"]
