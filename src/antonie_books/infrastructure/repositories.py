@@ -117,12 +117,7 @@ class MongoBookRepository:
         total = await self._books.count_documents(query)
         if (page - 1) * limit >= total:
             return (), total
-        cursor = (
-            self._books.find(query)
-            .sort("id", ASCENDING)
-            .skip((page - 1) * limit)
-            .limit(limit)
-        )
+        cursor = self._books.find(query).sort("id", ASCENDING).skip((page - 1) * limit).limit(limit)
         docs = await cursor.to_list(length=limit)
         return self._books_from_documents(docs), total
 
@@ -176,12 +171,7 @@ class MongoBookRepository:
         total = await self._books.count_documents(query)
         if (page - 1) * limit >= total:
             return (), total
-        cursor = (
-            self._books.find(query)
-            .sort("id", ASCENDING)
-            .skip((page - 1) * limit)
-            .limit(limit)
-        )
+        cursor = self._books.find(query).sort("id", ASCENDING).skip((page - 1) * limit).limit(limit)
         docs = await cursor.to_list(length=limit)
         return self._books_from_documents(docs), total
 

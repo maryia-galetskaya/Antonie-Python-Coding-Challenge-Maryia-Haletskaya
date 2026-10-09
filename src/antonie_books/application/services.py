@@ -119,9 +119,7 @@ class BookService:
             author=data.author, title=data.title, tags=data.tags, page=data.page, limit=data.limit
         )
         all_author_ids = tuple(dict.fromkeys(i for book in books for i in book.author_ids))
-        authors = (
-            await self._author_repository.get_many(all_author_ids) if all_author_ids else ()
-        )
+        authors = await self._author_repository.get_many(all_author_ids) if all_author_ids else ()
         return BookPageOutput(self._book_outputs(books, authors), data.page, data.limit, total)
 
     async def update(self, data: UpdateBookInput) -> BookOutput:
@@ -197,9 +195,7 @@ class AuthorService:
             data.author_id, page=data.page, limit=data.limit
         )
         author_ids = tuple(dict.fromkeys(i for book in books for i in book.author_ids))
-        authors = (
-            await self._author_repository.get_many(author_ids) if author_ids else ()
-        )
+        authors = await self._author_repository.get_many(author_ids) if author_ids else ()
         return BookPageOutput(
             BookService._book_outputs(books, authors), data.page, data.limit, total
         )
